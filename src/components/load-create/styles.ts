@@ -1,0 +1,105 @@
+import { StyleSheet } from 'react-native';
+
+import { FretixColors } from '@/constants/theme';
+
+export const loadCreateStyles = StyleSheet.create({
+  screenTitle: {
+    color: FretixColors.white,
+    fontSize: 22,
+    fontWeight: '700',
+    marginTop: 14,
+  },
+  screenSubtitle: {
+    color: FretixColors.grayLight,
+    fontSize: 13,
+    marginTop: 4,
+    lineHeight: 18,
+  },
+  section: {
+    marginTop: 20,
+    gap: 8,
+  },
+  sectionTitle: {
+    color: FretixColors.white,
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  sectionHint: {
+    color: FretixColors.grayLight,
+    fontSize: 12,
+    marginBottom: 4,
+  },
+  input: {
+    backgroundColor: '#111723',
+    borderWidth: 1,
+    borderColor: '#273444',
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 13,
+    color: FretixColors.white,
+    fontSize: 14,
+  },
+  inputRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#111723',
+    borderWidth: 1,
+    borderColor: '#273444',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    minHeight: 48,
+  },
+  inputRowField: {
+    flex: 1,
+    color: FretixColors.white,
+    fontSize: 14,
+    paddingVertical: 12,
+    paddingHorizontal: 4,
+  },
+  textArea: {
+    backgroundColor: '#111723',
+    borderWidth: 1,
+    borderColor: '#273444',
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingTop: 12,
+    paddingBottom: 28,
+    color: FretixColors.white,
+    fontSize: 14,
+    minHeight: 96,
+    textAlignVertical: 'top',
+  },
+  charCount: {
+    position: 'absolute',
+    right: 12,
+    bottom: 10,
+    color: '#6B7280',
+    fontSize: 11,
+  },
+  summaryCard: {
+    backgroundColor: '#111723',
+    borderWidth: 1,
+    borderColor: '#273444',
+    borderRadius: 12,
+    padding: 14,
+    gap: 10,
+    marginTop: 8,
+  },
+  summaryRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  summaryLabel: {
+    color: FretixColors.grayLight,
+    fontSize: 13,
+    flex: 1,
+  },
+  summaryValue: {
+    color: FretixColors.white,
+    fontSize: 13,
+    fontWeight: '600',
+    flex: 1,
+    textAlign: 'right',
+  },
+});

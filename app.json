@@ -1,0 +1,84 @@
+{
+  "expo": {
+    "name": "Fretix Driver",
+    "slug": "com-fretix-driver",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/images/icon.png",
+    "scheme": "fretix",
+    "userInterfaceStyle": "dark",
+    "splash": {
+      "image": "./assets/images/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0B0F14"
+    },
+    "ios": {
+      "icon": "./assets/expo.icon",
+      "infoPlist": {
+        "NSPhotoLibraryUsageDescription": "Permite selecionar uma foto para o perfil"
+      },
+      "config": {
+        "googleMapsApiKey": "AIzaSyDqxJoy4L6vgqYu2mgbx_0Jzh6JF18WADM"
+      }
+    },
+    "android": {
+      "predictiveBackGestureEnabled": false,
+      "package": "com.fretix.driver",
+      "permissions": ["READ_MEDIA_IMAGES", "READ_EXTERNAL_STORAGE"],
+      "config": {
+        "googleMaps": {
+          "apiKey": "AIzaSyDqxJoy4L6vgqYu2mgbx_0Jzh6JF18WADM"
+        }
+      }
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "static",
+      "favicon": "./assets/images/favicon.png"
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Permite partilhar a sua localização durante a viagem"
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Permite selecionar uma foto para o perfil"
+        }
+      ],
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/images/splash-icon.png",
+          "imageWidth": 200,
+          "resizeMode": "contain",
+          "backgroundColor": "#0B0F14",
+          "ios": {
+            "image": "./assets/images/splash-icon.png",
+            "imageWidth": 200,
+            "resizeMode": "contain",
+            "backgroundColor": "#0B0F14"
+          },
+          "android": {
+            "image": "./assets/images/splash-icon.png",
+            "imageWidth": 200,
+            "resizeMode": "contain",
+            "backgroundColor": "#0B0F14"
+          }
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": true
+    },
+    "extra": {
+      "router": {},
+      "googleMapsApiKey": "AIzaSyDqxJoy4L6vgqYu2mgbx_0Jzh6JF18WADM",
+      "googleClientId": "750540528154-nl33mipe4r1g6lnbam1k3kp59ukm9gg2.apps.googleusercontent.com"
+    }
+  }
+}
