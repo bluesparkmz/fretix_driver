@@ -12,6 +12,10 @@ export default function AppTabs() {
     '/login',
     '/notifications',
     '/personal-information',
+    '/trip_details',
+    '/trip_stops',
+    '/trip_stop_details',
+    '/trip_arrival_confirm',
   ].includes(pathname);
 
   const tabSlotStyle = StyleSheet.flatten([
@@ -29,6 +33,9 @@ export default function AppTabs() {
         <TabTrigger name="profile" href="/profile" />
         <TabTrigger name="notifications" href="/notifications" />
         <TabTrigger name="personal-information" href="/personal-information" />
+        <TabTrigger name="trip_details" href="/trip_details" />
+        <TabTrigger name="trip_stops" href="/trip_stops" />
+        <TabTrigger name="trip_arrival_confirm" href="/trip_arrival_confirm" />
       </TabList>
 
       {!hideTabBar && (

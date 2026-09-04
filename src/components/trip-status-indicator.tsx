@@ -4,11 +4,17 @@ import { Ionicons } from '@expo/vector-icons';
 import { FretixColors } from '@/constants/theme';
 
 export type LoadStatusType =
+    | 'aceite'
     | 'disponivel'
+    | 'indo_carregar'
+    | 'chegou_origem'
+    | 'carregado'
     | 'em_andamento'
     | 'em_viagem'
     | 'concluido'
-    | 'cancelado';
+    | 'concluida'
+    | 'cancelado'
+    | 'cancelada';
 
 interface StatusConfig {
     label: string;
@@ -19,25 +25,53 @@ interface StatusConfig {
 }
 
 const STATUS_CONFIG: Record<LoadStatusType, StatusConfig> = {
-    disponivel: {
-        label: 'Disponível',
-        color: '#10B981',
-        backgroundColor: 'rgba(16, 185, 129, 0.14)',
+    aceite: {
+        label: 'Aceite',
+        color: '#22C55E',
+        backgroundColor: 'rgba(34, 197, 94, 0.14)',
         icon: 'checkmark-circle-outline',
+        progressPercentage: 10,
+    },
+    disponivel: {
+        label: 'Aguardando Início',
+        color: '#6B7280',
+        backgroundColor: 'rgba(107, 114, 128, 0.14)',
+        icon: 'time-outline',
+    },
+    indo_carregar: {
+        label: 'Indo Carregar',
+        color: '#8B5CF6',
+        backgroundColor: 'rgba(139, 92, 246, 0.16)',
+        icon: 'navigate-outline',
+        progressPercentage: 20,
+    },
+    chegou_origem: {
+        label: 'Na Origem',
+        color: '#EC4899',
+        backgroundColor: 'rgba(236, 72, 153, 0.16)',
+        icon: 'location-outline',
+        progressPercentage: 35,
+    },
+    carregado: {
+        label: 'Carga Carregada',
+        color: '#10B981',
+        backgroundColor: 'rgba(16, 185, 129, 0.16)',
+        icon: 'cube-outline',
+        progressPercentage: 50,
     },
     em_andamento: {
         label: 'Aguardando',
         color: '#F59E0B',
         backgroundColor: 'rgba(245, 158, 11, 0.16)',
         icon: 'hourglass-outline',
-        progressPercentage: 25,
+        progressPercentage: 85,
     },
     em_viagem: {
         label: 'Em Viagem',
         color: '#3B82F6',
         backgroundColor: 'rgba(59, 130, 246, 0.14)',
         icon: 'car-outline',
-        progressPercentage: 50,
+        progressPercentage: 70,
     },
     concluido: {
         label: 'Concluído',
@@ -46,8 +80,21 @@ const STATUS_CONFIG: Record<LoadStatusType, StatusConfig> = {
         icon: 'checkmark-done-circle-outline',
         progressPercentage: 100,
     },
+    concluida: {
+        label: 'Concluída',
+        color: '#10B981',
+        backgroundColor: 'rgba(16, 185, 129, 0.14)',
+        icon: 'checkmark-done-circle-outline',
+        progressPercentage: 100,
+    },
     cancelado: {
         label: 'Cancelado',
+        color: '#EF4444',
+        backgroundColor: 'rgba(239, 68, 68, 0.14)',
+        icon: 'close-circle-outline',
+    },
+    cancelada: {
+        label: 'Cancelada',
         color: '#EF4444',
         backgroundColor: 'rgba(239, 68, 68, 0.14)',
         icon: 'close-circle-outline',

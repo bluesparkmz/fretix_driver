@@ -15,12 +15,22 @@ export function resolveLoadTypeImageUrl(
   loadType: string,
   types: LoadType[]
 ): string | null {
-  const id = normalizeLoadTypeId(loadType);
-  const match = types.find((item) => item.id === id);
+  const id = normalizeLoadTypeId(loadType).toLowerCase();
+  const match = types.find((item) => item.id.toLowerCase() === id);
   if (!match?.image) {
     return null;
   }
-  return `${api.defaults.baseURL}${match.image}`;
+
+  const image = match.image.trim();
+  if (image.startsWith('http://') || image.startsWith('https://')) {
+    return image;
+  }
+
+  const base = api.defaults.baseURL?.replace(/\/$/, '');
+  if (!base) {
+    return null;
+  }
+  return `${base}${image.startsWith('/') ? image : `/${image}`}`;
 }
 
 export function resolveLoadTypeLabel(

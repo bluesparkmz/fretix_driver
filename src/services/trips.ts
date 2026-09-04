@@ -85,6 +85,17 @@ export interface TripDriverSummary {
     profile_photo?: string | null;
 }
 
+export interface TripActivity {
+    id: number;
+    trip_id: number;
+    event_type: string;
+    title: string;
+    description?: string | null;
+    latitude?: number | null;
+    longitude?: number | null;
+    created_at: string;
+}
+
 export interface Trip {
     id: number;
     load_id?: number;
@@ -102,6 +113,9 @@ export interface Trip {
     client_name: string;
     client_phone?: string | null;
     status: string;
+    en_route_pickup_at?: string | null;
+    arrived_pickup_at?: string | null;
+    loaded_at?: string | null;
     started_at: string | null;
     arrived_at?: string | null;
     client_confirmed_at?: string | null;
@@ -113,6 +127,7 @@ export interface Trip {
     departure_date: string | null;
     created_at: string;
     stops?: TripStop[];
+    activities?: TripActivity[];
     load?: TripLoadSummary | null;
     vehicle?: TripVehicleSummary | null;
     driver?: TripDriverSummary | null;
@@ -152,13 +167,28 @@ export const tripService = {
         return response.data;
     },
 
+    async startPickupTrip(id: number | string): Promise<Trip> {
+        const response = await api.patch(`/driver/trips/${id}/start-pickup`);
+        return response.data;
+    },
+
+    async arrivePickupTrip(id: number | string): Promise<Trip> {
+        const response = await api.patch(`/driver/trips/${id}/arrive-pickup`);
+        return response.data;
+    },
+
+    async confirmLoadedTrip(id: number | string): Promise<Trip> {
+        const response = await api.patch(`/driver/trips/${id}/confirm-loaded`);
+        return response.data;
+    },
+
     async startTrip(id: number | string, data: TripStartPayload = {}): Promise<Trip> {
         const response = await api.patch(`/driver/trips/${id}/start`, data);
         return response.data;
     },
 
     async endTrip(id: number | string): Promise<Trip> {
-        const response = await api.patch(`/driver/trips/${id}/arrive`);
+        const response = await api.patch(`/driver/trips/${id}/end`);
         return response.data;
     },
 

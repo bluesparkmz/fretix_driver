@@ -7,9 +7,21 @@ export type MapCoordinate = {
 
 export type GoogleRouteSuggestion = {
   coordinates: MapCoordinate[];
+  steps: GoogleRouteStep[];
   distanceText: string;
   durationText: string;
   summary: string;
+};
+
+type RouteEndpoint = MapCoordinate | string;
+
+export type GoogleRouteStep = {
+  instruction: string;
+  distanceText: string;
+  durationText: string;
+  maneuver?: string;
+  startLocation: MapCoordinate;
+  endLocation: MapCoordinate;
 };
 
 export type MozambiquePlacePrediction = {
@@ -25,6 +37,13 @@ export type MozambiquePlaceSuggestion = MozambiquePlacePrediction & {
   city?: string;
   district?: string;
   province?: string;
+};
+
+export type NearbyPlaceLabel = {
+  id: string;
+  name: string;
+  coordinate: MapCoordinate;
+  category: string;
 };
 
 type GoogleAddressComponent = {
@@ -99,9 +118,9 @@ const limitRouteCoordinates = (coordinates: MapCoordinate[]) => {
 const getDetailedRouteCoordinates = (leg: any, fallbackPolyline: string): MapCoordinate[] => {
   const stepCoordinates: MapCoordinate[] = Array.isArray(leg.steps)
     ? leg.steps.flatMap((step: any) => {
-        const points = step.polyline?.points;
-        return typeof points === 'string' ? decodePolyline(points) : [];
-      })
+      const points = step.polyline?.points;
+      return typeof points === 'string' ? decodePolyline(points) : [];
+    })
     : [];
 
   if (stepCoordinates.length === 0) return limitRouteCoordinates(decodePolyline(fallbackPolyline));
@@ -113,6 +132,34 @@ const getDetailedRouteCoordinates = (leg: any, fallbackPolyline: string): MapCoo
 
   return limitRouteCoordinates(dedupedCoordinates);
 };
+
+const stripHtml = (value: string) =>
+  value
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+const mapRouteSteps = (leg: any): GoogleRouteStep[] =>
+  Array.isArray(leg.steps)
+    ? leg.steps
+      .map((step: any) => {
+        const start = step.start_location;
+        const end = step.end_location;
+        if (!start || !end) return null;
+
+        return {
+          instruction: stripHtml(step.html_instructions ?? 'Siga em frente'),
+          distanceText: step.distance?.text ?? '',
+          durationText: step.duration?.text ?? '',
+          maneuver: step.maneuver,
+          startLocation: { latitude: start.lat, longitude: start.lng },
+          endLocation: { latitude: end.lat, longitude: end.lng },
+        };
+      })
+      .filter((step: GoogleRouteStep | null): step is GoogleRouteStep => step !== null)
+    : [];
 
 const getComponentByTypes = (components: GoogleAddressComponent[], types: string[]) =>
   components.find((component) => component.types?.some((type) => types.includes(type)))?.long_name;
@@ -194,19 +241,37 @@ const mapPlaceResult = (result: any, fallbackName: string): MozambiquePlaceSugge
 
 export const googleMapsService = {
   async getDrivingRouteSuggestions(
-    origin: MapCoordinate,
-    destination: MapCoordinate
+    origin: RouteEndpoint,
+    destination: RouteEndpoint,
+    waypoints: MapCoordinate[] = []
   ): Promise<GoogleRouteSuggestion[]> {
     const apiKey = getGoogleMapsApiKey();
     if (!apiKey) return [];
+    const formatEndpoint = (endpoint: RouteEndpoint) =>
+      typeof endpoint === 'string'
+        ? endpoint
+        : `${endpoint.latitude},${endpoint.longitude}`;
 
     const params = new URLSearchParams({
-      origin: `${origin.latitude},${origin.longitude}`,
-      destination: `${destination.latitude},${destination.longitude}`,
+      origin: formatEndpoint(origin),
+      destination: formatEndpoint(destination),
       mode: 'driving',
       alternatives: 'true',
+      language: 'pt',
+      region: 'mz',
       key: apiKey,
     });
+
+    if (waypoints.length > 0) {
+      params.set(
+        'waypoints',
+        waypoints
+          .slice(0, 23)
+          .map((coordinate) => `${coordinate.latitude},${coordinate.longitude}`)
+          .join('|'),
+      );
+      params.set('alternatives', 'false');
+    }
 
     const response = await fetch(`https://maps.googleapis.com/maps/api/directions/json?${params.toString()}`);
     if (!response.ok) {
@@ -214,7 +279,14 @@ export const googleMapsService = {
     }
 
     const data = await response.json();
-    if (data.status !== 'OK' || !Array.isArray(data.routes)) {
+    if (data.status !== 'OK') {
+      if (data.status === 'ZERO_RESULTS') {
+        return [];
+      }
+      throw new Error(data.error_message || `Google Directions returned ${data.status}`);
+    }
+
+    if (!Array.isArray(data.routes)) {
       throw new Error(data.error_message || `Google Directions returned ${data.status}`);
     }
 
@@ -227,6 +299,7 @@ export const googleMapsService = {
 
         return {
           coordinates: getDetailedRouteCoordinates(leg, encodedPolyline),
+          steps: mapRouteSteps(leg),
           distanceText: leg.distance?.text ?? '',
           durationText: leg.duration?.text ?? '',
           summary: route.summary ?? 'Google Maps',
@@ -338,5 +411,33 @@ export const googleMapsService = {
       coordinate,
       ...getMozambiquePlaceDetails(mozambiqueResult),
     };
+  },
+
+  async getNearbyDestinationPlaces(coordinate: MapCoordinate): Promise<NearbyPlaceLabel[]> {
+    const apiKey = getGoogleMapsApiKey();
+    if (!apiKey) return [];
+
+    const params = new URLSearchParams({
+      location: `${coordinate.latitude},${coordinate.longitude}`,
+      radius: '1800',
+      type: 'establishment',
+      language: 'pt',
+      key: apiKey,
+    });
+    const response = await fetch(`https://maps.googleapis.com/maps/api/place/nearbysearch/json?${params.toString()}`);
+    if (!response.ok) return [];
+    const data = await response.json();
+    if (data.status !== 'OK') return [];
+
+    const usefulTypes = ['hospital', 'store', 'supermarket', 'pharmacy', 'bank', 'gas_station', 'restaurant', 'lodging'];
+    return (data.results ?? [])
+      .filter((place: any) => place.geometry?.location && place.types?.some((type: string) => usefulTypes.includes(type)))
+      .slice(0, 8)
+      .map((place: any) => ({
+        id: place.place_id,
+        name: place.name,
+        coordinate: { latitude: place.geometry.location.lat, longitude: place.geometry.location.lng },
+        category: place.types?.[0] ?? 'local',
+      }));
   },
 };

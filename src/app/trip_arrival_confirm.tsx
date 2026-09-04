@@ -240,12 +240,8 @@ const styles = StyleSheet.create({
   content: { padding: 16, paddingBottom: BottomTabInset + 140, gap: 16 },
   headerRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 },
   iconButton: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
-    backgroundColor: '#141B24',
-    borderWidth: 1,
-    borderColor: '#263242',
+    width: 40,
+    height: 40,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -334,4 +330,4 @@ const styles = StyleSheet.create({
   secondaryButtonText: { color: FretixColors.white, fontSize: 15, fontWeight: '700' },
   emptyWrap: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 16, padding: 24 },
   emptyTitle: { color: FretixColors.white, fontSize: 18, fontWeight: '800' },
-}
+});

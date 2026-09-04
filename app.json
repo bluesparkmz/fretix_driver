@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "Fretix Driver",
-    "slug": "com-fretix-driver",
+    "slug": "fretix-driver",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
@@ -24,7 +24,11 @@
     "android": {
       "predictiveBackGestureEnabled": false,
       "package": "com.fretix.driver",
-      "permissions": ["READ_MEDIA_IMAGES", "READ_EXTERNAL_STORAGE"],
+      "permissions": [
+        "android.permission.READ_MEDIA_IMAGES",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.RECORD_AUDIO"
+      ],
       "config": {
         "googleMaps": {
           "apiKey": "AIzaSyDqxJoy4L6vgqYu2mgbx_0Jzh6JF18WADM"
@@ -38,12 +42,6 @@
     },
     "plugins": [
       "expo-router",
-      [
-        "expo-location",
-        {
-          "locationWhenInUsePermission": "Permite partilhar a sua localização durante a viagem"
-        }
-      ],
       [
         "expo-image-picker",
         {
@@ -70,7 +68,8 @@
             "backgroundColor": "#0B0F14"
           }
         }
-      ]
+      ],
+      "expo-web-browser"
     ],
     "experiments": {
       "typedRoutes": true
@@ -78,7 +77,10 @@
     "extra": {
       "router": {},
       "googleMapsApiKey": "AIzaSyDqxJoy4L6vgqYu2mgbx_0Jzh6JF18WADM",
-      "googleClientId": "750540528154-nl33mipe4r1g6lnbam1k3kp59ukm9gg2.apps.googleusercontent.com"
+      "googleClientId": "750540528154-nl33mipe4r1g6lnbam1k3kp59ukm9gg2.apps.googleusercontent.com",
+      "eas": {
+        "projectId": "16809afb-6d6f-4933-aea5-279f55fcea6b"
+      }
     }
   }
 }

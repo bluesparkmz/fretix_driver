@@ -3,8 +3,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Pressable as RNPressable } from 'react-native';
 import {
     ActivityIndicator,
-    FlatList,
-    Pressable,
+    FlatList, Image, Pressable,
     RefreshControl,
     ScrollView,
     StyleSheet,
@@ -15,6 +14,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { TopAppHeader } from '@/components/top-app-header';
 import { TripStatusBadge, type LoadStatusType } from '@/components/trip-status-indicator';
+import { LoadTypeImage } from '@/components/load-type-image';
 import { BottomTabInset, FretixColors } from '@/constants/theme';
 import { useWebSocket } from '@/context/WebSocketContext';
 import { tripService, type Trip } from '@/services/trips';
@@ -27,8 +27,8 @@ type TripFilterTab = {
 };
 
 const tripFilterTabs: TripFilterTab[] = [
-    { label: 'Todas', icon: 'albums-outline', statuses: ['aguardando_inicio', 'viagem_iniciada', 'aguardando_cliente', 'concluida', 'cancelado'] },
-    { label: 'Em andamento', icon: 'car-outline', statuses: ['aguardando_inicio', 'viagem_iniciada', 'aguardando_cliente'] },
+    { label: 'Todas', icon: 'albums-outline', statuses: ['aguardando_inicio', 'indo_carregar', 'chegou_origem', 'carregado', 'viagem_iniciada', 'aguardando_cliente', 'concluida', 'cancelado'] },
+    { label: 'Em andamento', icon: 'car-outline', statuses: ['aguardando_inicio', 'indo_carregar', 'chegou_origem', 'carregado', 'viagem_iniciada', 'aguardando_cliente'] },
     { label: 'Concluídas', icon: 'checkmark-done-outline', statuses: ['concluida'] },
     { label: 'Canceladas', icon: 'close-circle-outline', statuses: ['cancelado'] },
 ];
@@ -179,12 +179,30 @@ export default function TripsScreen() {
                                     )
                                 }
                             >
-                                <View style={styles.cardRow}>
-                                    <View style={styles.cardInfo}>
-                                        <Text style={styles.cardTitle}>Viagem #{item.id}</Text>
-                                        <Text style={styles.cardSubtitle}>{item.load_code || 'Carga sem código'}</Text>
+                                <View style={styles.cardTopRow}>
+                                    <View style={styles.imgWrap}>
+                                        <Image
+                                            source={
+                                                item.vehicle?.photo
+                                                    ? { uri: item.vehicle.photo }
+                                                    : require('../../assets/camiao_cover.png')
+                                            }
+                                            style={styles.img}
+                                            resizeMode="cover"
+                                        />
+                                        <View style={styles.imgBadge}>
+                                            <LoadTypeImage loadType={item.load_type ?? ''} style={styles.imgBadgeImg} fallbackIconSize={14} />
+                                        </View>
                                     </View>
-                                    <TripStatusBadge status={getTripStatus(item.status)} />
+
+                                    <View style={styles.cardInfoRow}>
+                                        <Text style={styles.cardTitle}>Viagem #{item.id}</Text>
+                                        <Text style={styles.cardSubtitle} numberOfLines={1}>
+                                            {item.vehicle?.plate ? `Matrícula ${item.vehicle.plate}` : item.load_code || 'Carga sem código'}
+                                        </Text>
+                                    </View>
+
+                                    <TripStatusBadge status={mapStatus(item.status)} />
                                 </View>
 
                                 <View style={styles.cardMeta}>
@@ -217,8 +235,16 @@ export default function TripsScreen() {
     );
 }
 
-function getTripStatus(status: string): LoadStatusType {
+function mapStatus(status: string): LoadStatusType {
     switch (status) {
+        case 'aguardando_inicio':
+            return 'disponivel';
+        case 'indo_carregar':
+            return 'indo_carregar';
+        case 'chegou_origem':
+            return 'chegou_origem';
+        case 'carregado':
+            return 'carregado';
         case 'viagem_iniciada':
             return 'em_viagem';
         case 'aguardando_cliente':
@@ -227,10 +253,8 @@ function getTripStatus(status: string): LoadStatusType {
             return 'concluido';
         case 'cancelado':
             return 'cancelado';
-        case 'aguardando_inicio':
-            return 'em_andamento';
         default:
-            return 'em_andamento';
+            return 'disponivel';
     }
 }
 
@@ -323,9 +347,48 @@ const styles = StyleSheet.create({
         alignItems: 'flex-start',
         gap: 12,
     },
+    cardTopRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 12,
+    },
+    imgWrap: {
+        width: 68,
+        height: 68,
+        position: 'relative',
+        flexShrink: 0,
+    },
+    img: {
+        width: 68,
+        height: 68,
+        borderRadius: 12,
+        backgroundColor: '#0D1118',
+    },
+    imgBadge: {
+        position: 'absolute',
+        right: -4,
+        bottom: -4,
+        width: 28,
+        height: 28,
+        borderRadius: 14,
+        backgroundColor: '#131E2C',
+        borderWidth: 2,
+        borderColor: '#2A3A50',
+        overflow: 'hidden',
+    },
+    imgBadgeImg: {
+        width: '100%',
+        height: '100%',
+        borderRadius: 14,
+    },
     cardInfo: {
         flex: 1,
         gap: 6,
+    },
+    cardInfoRow: {
+        flex: 1,
+        justifyContent: 'center',
+        gap: 4,
     },
     cardTitle: {
         color: FretixColors.white,
