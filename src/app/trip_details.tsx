@@ -15,7 +15,7 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
+import MapView, { AnimatedRegion, Marker, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
 
 import { CustomDialog } from '@/components/custom-dialog';
 import { LoadTypeImage } from '@/components/load-type-image';
@@ -41,39 +41,43 @@ const EXPANDED_HEIGHT = SCREEN_HEIGHT * 0.72;
 const DRAG_THRESHOLD = 60;
 const FOOTER_HEIGHT = 130;
 
-const DARK_MAP_STYLE = [
-  { elementType: 'geometry', stylers: [{ color: '#171C22' }] },
-  { elementType: 'labels.icon', stylers: [{ visibility: 'off' }] },
-  { elementType: 'labels.text.fill', stylers: [{ color: '#E5E7EB' }] },
-  { elementType: 'labels.text.stroke', stylers: [{ color: '#05070A' }, { weight: 3 }] },
-  { featureType: 'administrative', elementType: 'geometry', stylers: [{ color: '#334155' }] },
-  { featureType: 'administrative.locality', elementType: 'labels.text.fill', stylers: [{ color: '#F8FAFC' }] },
-  { featureType: 'administrative.neighborhood', elementType: 'labels.text.fill', stylers: [{ color: '#CBD5E1' }] },
-  { featureType: 'poi', elementType: 'geometry', stylers: [{ color: '#1F2937' }] },
-  { featureType: 'poi', elementType: 'labels.text.fill', stylers: [{ color: '#CBD5E1' }] },
-  // Keep the map clean generally, but let Google show useful nearby places
-  // (shops, hospitals, fuel stations) naturally when the driver zooms in.
-  { featureType: 'poi', elementType: 'labels.icon', stylers: [{ visibility: 'on' }] },
-  { featureType: 'poi.business', elementType: 'labels.text', stylers: [{ visibility: 'on' }] },
-  { featureType: 'road', elementType: 'geometry.fill', stylers: [{ color: '#2F3845' }] },
-  { featureType: 'road', elementType: 'geometry.stroke', stylers: [{ color: '#111827' }] },
-  { featureType: 'road', elementType: 'labels.text.fill', stylers: [{ color: '#F9FAFB' }] },
-  { featureType: 'road.highway', elementType: 'geometry.fill', stylers: [{ color: '#4B5563' }] },
-  { featureType: 'road.highway', elementType: 'geometry.stroke', stylers: [{ color: '#111827' }] },
-  { featureType: 'road.highway', elementType: 'labels.text.fill', stylers: [{ color: '#FFE082' }] },
-  { featureType: 'transit', elementType: 'geometry', stylers: [{ color: '#273244' }] },
-  { featureType: 'transit', elementType: 'labels.text.fill', stylers: [{ color: '#CBD5E1' }] },
-  { featureType: 'water', elementType: 'geometry.fill', stylers: [{ color: '#08111C' }] },
-  { featureType: 'water', elementType: 'labels.text.fill', stylers: [{ color: '#93C5FD' }] },
-];
 
 type Coordinate = MapCoordinate;
-const REROUTE_DISTANCE_THRESHOLD_KM = 0.5;
-const REROUTE_MIN_INTERVAL_MS = 30_000;
+// Map matching visual + recálculo de rota.
+// Até 55 m da polyline, o marcador é encaixado visualmente na estrada.
+// Acima de 75 m por 2 amostras seguidas, consideramos desvio real e recalculamos.
+const ROUTE_SNAP_THRESHOLD_KM = 0.045;
+const ROUTE_DEVIATION_THRESHOLD_KM = 0.065;
+const REROUTE_MIN_INTERVAL_MS = 6_000;
+const OFF_ROUTE_SAMPLES_REQUIRED = 2;
 const NAVIGATION_CAMERA_ZOOM = 17;
 const NAVIGATION_CAMERA_PITCH = 67;
 const GUIDANCE_HIGHLIGHT_DISTANCE_KM = 0.3;
 const DEFAULT_MAP_CENTER: Coordinate = { latitude: -18.6657, longitude: 35.5296 };
+
+const normalizeTripStatus = (value?: string | null) =>
+  (value ?? '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+
+const isCompletedStatus = (value?: string | null) =>
+  ['concluida', 'concluido', 'completed', 'complete', 'finalizada', 'finalizado']
+    .includes(normalizeTripStatus(value));
+
+const getEffectiveTripStatus = (trip: Trip | null | undefined, liveStatus?: string | null) => {
+  if (
+    trip?.completed_at ||
+    trip?.client_confirmed_at ||
+    isCompletedStatus(liveStatus) ||
+    isCompletedStatus(trip?.status)
+  ) {
+    return 'concluida';
+  }
+
+  return liveStatus ?? trip?.status ?? 'aguardando_inicio';
+};
 
 const getTripStatus = (status: string): LoadStatusType => {
   if (status === 'aguardando_inicio') return 'disponivel';
@@ -123,6 +127,78 @@ const formatCurrency = (value: number | null | undefined) => {
 const formatDistance = (value?: number | null) => {
   if (value == null || Number.isNaN(value)) return '—';
   return `${value.toFixed(1)} km`;
+};
+
+const parseGoogleDistanceKm = (distanceText?: string | null) => {
+  if (!distanceText) return null;
+
+  const normalized = distanceText
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const numericPart = normalized.replace(/[^\d.,]/g, '');
+  if (!numericPart) return null;
+
+  let parsed: number;
+
+  if (numericPart.includes(',')) {
+    // Ex.: "1.186,4 km" -> 1186.4
+    parsed = Number.parseFloat(numericPart.replace(/\./g, '').replace(',', '.'));
+  } else if (/^\d{1,3}(\.\d{3})+$/.test(numericPart)) {
+    // Google em pt pode devolver "1.186 km" para 1186 km.
+    parsed = Number.parseFloat(numericPart.replace(/\./g, ''));
+  } else {
+    parsed = Number.parseFloat(numericPart);
+  }
+
+  if (!Number.isFinite(parsed)) return null;
+  if (normalized.includes(' km')) return parsed;
+  if (normalized.endsWith('m') || normalized.includes(' m')) return parsed / 1000;
+
+  return null;
+};
+
+const getPolylineDistanceKm = (coordinates: Coordinate[]) => {
+  if (coordinates.length < 2) return 0;
+
+  let total = 0;
+  for (let index = 1; index < coordinates.length; index += 1) {
+    total += getDistanceKm(coordinates[index - 1], coordinates[index]);
+  }
+  return total;
+};
+
+const getTrackedDistanceKm = (locations: TripLocation[]) => {
+  if (locations.length < 2) return 0;
+
+  let total = 0;
+
+  for (let index = 1; index < locations.length; index += 1) {
+    const previous = locations[index - 1];
+    const current = locations[index];
+
+    const distanceKm = getDistanceKm(
+      { latitude: previous.latitude, longitude: previous.longitude },
+      { latitude: current.latitude, longitude: current.longitude },
+    );
+
+    const previousTime = new Date(previous.created_at).getTime();
+    const currentTime = new Date(current.created_at).getTime();
+    const deltaHours = (currentTime - previousTime) / 3_600_000;
+
+    // Descarta saltos de GPS incompatíveis com um camião.
+    if (deltaHours > 0) {
+      const impliedSpeedKmH = distanceKm / deltaHours;
+      if (impliedSpeedKmH > 220) continue;
+    } else if (distanceKm > 1) {
+      continue;
+    }
+
+    total += distanceKm;
+  }
+
+  return total;
 };
 
 const toCoordinateNumber = (value: number | string | null | undefined) => {
@@ -188,6 +264,90 @@ const getDistanceKm = (a: Coordinate, b: Coordinate) => {
     Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
   return 2 * radiusKm * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
 };
+
+/**
+ * Projecta a posição GPS no segmento mais próximo da rota.
+ * Isto funciona como "map matching" visual: enquanto o GPS estiver perto
+ * da estrada calculada, o camião aparece exactamente sobre a polyline.
+ */
+const getClosestPointOnRoute = (point: Coordinate, route: Coordinate[]) => {
+  if (route.length === 0) {
+    return {
+      coordinate: point,
+      distanceKm: Number.POSITIVE_INFINITY,
+      segmentIndex: 0,
+    };
+  }
+
+  if (route.length === 1) {
+    return {
+      coordinate: route[0],
+      distanceKm: getDistanceKm(point, route[0]),
+      segmentIndex: 0,
+    };
+  }
+
+  const earthRadiusM = 6_371_000;
+  const originLatRad = (point.latitude * Math.PI) / 180;
+  const cosLat = Math.max(0.000001, Math.abs(Math.cos(originLatRad)));
+
+  const toLocalMeters = (coordinate: Coordinate) => {
+    const dLat = ((coordinate.latitude - point.latitude) * Math.PI) / 180;
+    const dLng = ((coordinate.longitude - point.longitude) * Math.PI) / 180;
+
+    return {
+      x: earthRadiusM * dLng * cosLat,
+      y: earthRadiusM * dLat,
+    };
+  };
+
+  let bestDistanceM = Number.POSITIVE_INFINITY;
+  let bestCoordinate = point;
+  let bestSegmentIndex = 0;
+
+  for (let index = 0; index < route.length - 1; index += 1) {
+    const a = toLocalMeters(route[index]);
+    const b = toLocalMeters(route[index + 1]);
+
+    const abX = b.x - a.x;
+    const abY = b.y - a.y;
+    const lengthSquared = abX * abX + abY * abY;
+
+    let t = 0;
+    if (lengthSquared > 0) {
+      t = Math.max(
+        0,
+        Math.min(1, -(a.x * abX + a.y * abY) / lengthSquared),
+      );
+    }
+
+    const closestX = a.x + t * abX;
+    const closestY = a.y + t * abY;
+    const distanceM = Math.hypot(closestX, closestY);
+
+    if (distanceM < bestDistanceM) {
+      bestDistanceM = distanceM;
+      bestSegmentIndex = index;
+      bestCoordinate = {
+        latitude:
+          point.latitude +
+          ((closestY / earthRadiusM) * 180) / Math.PI,
+        longitude:
+          point.longitude +
+          ((closestX / (earthRadiusM * cosLat)) * 180) / Math.PI,
+      };
+    }
+  }
+
+  return {
+    coordinate: bestCoordinate,
+    distanceKm: bestDistanceM / 1000,
+    segmentIndex: bestSegmentIndex,
+  };
+};
+
+const getDistanceToRouteKm = (point: Coordinate, route: Coordinate[]) =>
+  getClosestPointOnRoute(point, route).distanceKm;
 
 const buildTraveledRouteCoordinates = (
   historyCoordinates: Coordinate[],
@@ -297,6 +457,66 @@ const buildRouteWaypoints = (history: Coordinate[], liveCoordinate: Coordinate |
   return combined.filter((_, index) => index === combined.length - 1 || index % stride === 0).slice(0, 23);
 };
 
+const splitRouteAtCurrentPosition = (
+  current: Coordinate,
+  route: Coordinate[],
+  active: boolean,
+) => {
+  if (!active || route.length < 2) {
+    return {
+      traveled: [] as Coordinate[],
+      remaining: route,
+    };
+  }
+
+  const projection = getClosestPointOnRoute(current, route);
+  const splitIndex = Math.min(
+    Math.max(projection.segmentIndex, 0),
+    route.length - 2,
+  );
+
+  return {
+    traveled: [
+      ...route.slice(0, splitIndex + 1),
+      projection.coordinate,
+    ],
+    remaining: [
+      projection.coordinate,
+      ...route.slice(splitIndex + 1),
+    ],
+  };
+};
+
+const extractRoadNameFromInstruction = (instruction?: string | null) => {
+  if (!instruction) return null;
+
+  const cleaned = instruction.replace(/\s+/g, ' ').trim();
+
+  const directionalOnly =
+    /^(siga|continue|vire|mantenha).*(norte|sul|leste|oeste|nordeste|noroeste|sudeste|sudoeste)$/i;
+  if (directionalOnly.test(cleaned)) return null;
+
+  const namedRoad = cleaned.match(
+    /((?:avenida|av\.?|rua|estrada|rodovia|autoestrada|n\d+|en\d+)\s+[^,;]+)/i,
+  );
+  if (namedRoad?.[1]) return namedRoad[1].trim();
+
+  const afterConnector = cleaned.match(
+    /(?:na|no|pela|pelo|para a|para o)\s+(.+)$/i,
+  );
+  if (afterConnector?.[1]) {
+    const candidate = afterConnector[1].trim();
+    if (
+      candidate.length >= 2 &&
+      !/^(norte|sul|leste|oeste|nordeste|noroeste|sudeste|sudoeste)$/i.test(candidate)
+    ) {
+      return candidate;
+    }
+  }
+
+  return null;
+};
+
 const getNextNavigationStep = (current: Coordinate, steps: GoogleRouteStep[]) => {
   if (steps.length === 0) return null;
   const nextStep = steps.find((step) => getDistanceKm(current, step.endLocation) > 0.08) ?? steps[steps.length - 1];
@@ -304,6 +524,136 @@ const getNextNavigationStep = (current: Coordinate, steps: GoogleRouteStep[]) =>
     ...nextStep,
     distanceKm: getDistanceKm(current, nextStep.endLocation),
   };
+};
+
+
+type JourneyStageState = 'completed' | 'active' | 'upcoming';
+
+type JourneyStage = {
+  key: string;
+  title: string;
+  subtitle: string;
+  time?: string | null;
+  state: JourneyStageState;
+};
+
+const getJourneyStatusRank = (status: string) => {
+  const normalized = normalizeTripStatus(status);
+
+  const ranks: Record<string, number> = {
+    aguardando_inicio: 0,
+    indo_carregar: 1,
+    chegou_origem: 2,
+    carregado: 3,
+    viagem_iniciada: 4,
+    aguardando_cliente: 5,
+    concluida: 6,
+    concluido: 6,
+    completed: 6,
+    finalizada: 6,
+    finalizado: 6,
+  };
+
+  return ranks[normalized] ?? 0;
+};
+
+const getJourneyStages = (
+  trip: Trip,
+  currentStatus: string,
+): JourneyStage[] => {
+  const rank = getJourneyStatusRank(currentStatus);
+
+  const stateFor = (
+    completedWhenRankAtLeast: number,
+    activeWhenRanks: number[],
+  ): JourneyStageState => {
+    if (rank >= completedWhenRankAtLeast) return 'completed';
+    if (activeWhenRanks.includes(rank)) return 'active';
+    return 'upcoming';
+  };
+
+  const loadingState = stateFor(3, [2]);
+  const transportState = stateFor(5, [3, 4]);
+  const confirmationState = stateFor(6, [5]);
+
+  return [
+    {
+      key: 'pickup-drive',
+      title: 'Indo carregar',
+      subtitle:
+        rank <= 1
+          ? 'A percorrer a estrada até ao local de origem.'
+          : 'Deslocação até à origem concluída.',
+      time: trip.en_route_pickup_at,
+      state: stateFor(2, [0, 1]),
+    },
+    {
+      key: 'pickup-arrival',
+      title: 'Chegou à origem',
+      subtitle: 'Chegada ao local de recolha confirmada.',
+      time: trip.arrived_pickup_at,
+      state: rank >= 2 ? 'completed' : 'upcoming',
+    },
+    {
+      key: 'loaded',
+      title:
+        loadingState === 'active'
+          ? 'A carregar'
+          : 'Carga carregada',
+      subtitle:
+        loadingState === 'active'
+          ? 'O carregamento da carga está em curso.'
+          : loadingState === 'completed'
+            ? 'Carga confirmada no camião.'
+            : 'Aguardando chegada e carregamento.',
+      time: trip.loaded_at,
+      state: loadingState,
+    },
+    {
+      key: 'transport',
+      title:
+        rank === 3
+          ? 'Pronto para iniciar viagem'
+          : transportState === 'active'
+            ? 'Em viagem'
+            : 'Transporte até ao destino',
+      subtitle:
+        rank === 3
+          ? 'Carga pronta. Inicie o percurso até ao destino.'
+          : transportState === 'active'
+            ? 'O camião está a transportar a carga.'
+            : transportState === 'completed'
+              ? 'Percurso de transporte concluído.'
+              : 'Aguardando início da viagem.',
+      time:
+        transportState === 'completed'
+          ? trip.arrived_at
+          : trip.started_at,
+      state: transportState,
+    },
+    {
+      key: 'destination-arrival',
+      title: 'Chegada ao destino',
+      subtitle: 'Chegada ao destino final confirmada.',
+      time: trip.arrived_at,
+      state: rank >= 5 ? 'completed' : 'upcoming',
+    },
+    {
+      key: 'client-confirmation',
+      title:
+        confirmationState === 'active'
+          ? 'Aguardando confirmação'
+          : 'Concluída',
+      subtitle:
+        confirmationState === 'active'
+          ? 'Aguardando o cliente confirmar a entrega.'
+          : confirmationState === 'completed'
+            ? 'Entrega confirmada e viagem encerrada.'
+            : 'Confirmação final da entrega.',
+      time: trip.completed_at ?? trip.client_confirmed_at,
+      state: confirmationState,
+    },
+  ];
 };
 
 export default function TripDetailsScreen() {
@@ -330,6 +680,7 @@ export default function TripDetailsScreen() {
   const [is3DMode, setIs3DMode] = useState(true);
   const [currentPlace, setCurrentPlace] = useState<MozambiquePlaceSuggestion | null>(null);
   const [currentPlaceLoading, setCurrentPlaceLoading] = useState(false);
+  const [currentZoneLabel, setCurrentZoneLabel] = useState<string | null>(null);
   const [dialogVisible, setDialogVisible] = useState(false);
   const [dialogProps, setDialogProps] = useState({
     title: '',
@@ -340,7 +691,22 @@ export default function TripDetailsScreen() {
   const sheetHeight = useRef(new Animated.Value(COLLAPSED_HEIGHT)).current;
   const lastHeight = useRef(COLLAPSED_HEIGHT);
   const mapRef = useRef<MapView | null>(null);
+
+  // Marcador animado: a posição desliza entre actualizações GPS em vez de saltar.
+  const driverAnimatedCoordinate = useRef(
+    new AnimatedRegion({
+      latitude: DEFAULT_MAP_CENTER.latitude,
+      longitude: DEFAULT_MAP_CENTER.longitude,
+      latitudeDelta: 0,
+      longitudeDelta: 0,
+    }),
+  ).current;
+  const previousDriverCoordinateRef = useRef<Coordinate | null>(null);
+  const [driverBearing, setDriverBearing] = useState(0);
+
   const lastRerouteRef = useRef<{ coordinate: Coordinate; timestamp: number } | null>(null);
+  const rerouteInFlightRef = useRef(false);
+  const offRouteSamplesRef = useRef(0);
   const tripLoadRequestRef = useRef(0);
   useSmartBackHandler({ returnTo, from, fallback: '/trips' });
 
@@ -387,10 +753,13 @@ export default function TripDetailsScreen() {
   const tripForRoute = routeLoad && currentTrip
     ? ({ ...currentTrip, load: { ...currentTrip.load, ...routeLoad } } as Trip)
     : currentTrip;
-  const currentStatus = liveStatus ?? currentTrip?.status ?? 'aguardando_inicio';
+  const currentStatus = getEffectiveTripStatus(currentTrip, liveStatus);
   const isTripStarted = ['indo_carregar', 'chegou_origem', 'carregado', 'viagem_iniciada'].includes(currentStatus);
   const isHeadingToPickup = ['indo_carregar', 'chegou_origem'].includes(currentStatus);
-  const shouldShareDriverLocation = isTripStarted;
+  // Mantém o GPS local activo durante as fases de navegação.
+  // O envio ao servidor só começa quando a viagem de entrega estiver oficialmente iniciada.
+  const shouldTrackDriverLocation = isTripStarted;
+  const shouldPersistDriverLocation = currentStatus === 'viagem_iniciada';
 
   const {
     isSharing: isDriverLocationSharing,
@@ -398,9 +767,11 @@ export default function TripDetailsScreen() {
     permissionGranted: driverLocationPermissionGranted,
     lastSentAt: driverLocationLastSentAt,
     errorMessage: driverLocationError,
+    currentLocation: driverDeviceLocation,
   } = useDriverTripLocationSharing({
     tripId: Number.isFinite(numericTripId) ? numericTripId : null,
-    enabled: shouldShareDriverLocation,
+    enabled: shouldTrackDriverLocation,
+    persistToServer: shouldPersistDriverLocation,
   });
   // The backend is the source of truth for the trip position. This keeps the
   // driver and CargoLink maps in sync even when the driver's realtime socket
@@ -410,7 +781,71 @@ export default function TripDetailsScreen() {
     currentTrip?.driver?.current_lat ?? currentTrip?.vehicle?.current_lat,
     currentTrip?.driver?.current_lng ?? currentTrip?.vehicle?.current_lng,
   );
-  const navigationLocation = liveLocation ?? savedLocation ?? driverSavedLocation;
+  // A posição do próprio telefone tem prioridade para a navegação do motorista.
+  const navigationLocation =
+    driverDeviceLocation ?? liveLocation ?? savedLocation ?? driverSavedLocation;
+
+  const effectiveRouteForSnap =
+    routePath.length > 1
+      ? routePath
+      : routeOptions[0]?.coordinates ?? [];
+
+  const routeProjection =
+    navigationLocation && effectiveRouteForSnap.length > 1
+      ? getClosestPointOnRoute(navigationLocation, effectiveRouteForSnap)
+      : null;
+
+  const isSnappedToRoute =
+    routeProjection != null &&
+    routeProjection.distanceKm <= ROUTE_SNAP_THRESHOLD_KM;
+
+  const displayNavigationLocation =
+    navigationLocation && isSnappedToRoute
+      ? routeProjection!.coordinate
+      : navigationLocation;
+
+  // Suaviza o movimento do camião e usa a direcção da estrada quando o
+  // veículo está encaixado na rota. Fora da rota usa o bearing do GPS.
+  useEffect(() => {
+    if (!displayNavigationLocation) return;
+
+    if (
+      isSnappedToRoute &&
+      routeProjection &&
+      effectiveRouteForSnap[routeProjection.segmentIndex + 1]
+    ) {
+      setDriverBearing(
+        getBearing(
+          effectiveRouteForSnap[routeProjection.segmentIndex],
+          effectiveRouteForSnap[routeProjection.segmentIndex + 1],
+        ),
+      );
+    } else {
+      const previous = previousDriverCoordinateRef.current;
+
+      if (previous && !coordinatesMatch(previous, displayNavigationLocation)) {
+        setDriverBearing(getBearing(previous, displayNavigationLocation));
+      }
+    }
+
+    driverAnimatedCoordinate
+      .timing({
+        latitude: displayNavigationLocation.latitude,
+        longitude: displayNavigationLocation.longitude,
+        duration: 900,
+        useNativeDriver: false,
+      })
+      .start();
+
+    previousDriverCoordinateRef.current = displayNavigationLocation;
+  }, [
+    driverAnimatedCoordinate,
+    displayNavigationLocation?.latitude,
+    displayNavigationLocation?.longitude,
+    isSnappedToRoute,
+    routeProjection?.segmentIndex,
+    routePath,
+  ]);
 
   const showDialog = useCallback((title: string, message: string, type: 'success' | 'error' | 'info' = 'info') => {
     setDialogProps({ title, message, type });
@@ -453,6 +888,8 @@ export default function TripDetailsScreen() {
     // Clear the old map immediately instead of showing its route while loading.
     tripLoadRequestRef.current += 1;
     lastRerouteRef.current = null;
+    rerouteInFlightRef.current = false;
+    offRouteSamplesRef.current = 0;
     setTrip(null);
     setLoadedTripId(null);
     setRouteLoad(null);
@@ -462,6 +899,7 @@ export default function TripDetailsScreen() {
     setRouteOptions([]);
     setRouteError(null);
     setCurrentPlace(null);
+    setCurrentZoneLabel(null);
     setIsMapReady(false);
     setLoading(true);
   }, [id]);
@@ -535,15 +973,19 @@ export default function TripDetailsScreen() {
     return () => {
       active = false;
     };
-  }, [currentTrip?.id, isTripStarted, isHeadingToPickup, liveLocation?.latitude, liveLocation?.longitude, routeLoad?.id]);
+  }, [currentTrip?.id, isTripStarted, isHeadingToPickup, routeLoad?.id]);
 
   useEffect(() => {
     if (!currentTrip || !isMapReady) return;
     const { originCoordinate, destinationCoordinate } = getTripRouteData(tripForRoute ?? currentTrip);
     const historyCoordinates = normalizeTripLocations(locationHistory);
-    const liveMarker = isTripStarted ? navigationLocation : null;
+    const liveMarker = isTripStarted ? displayNavigationLocation : null;
     const traveledRouteCoordinates = buildTraveledRouteCoordinates(historyCoordinates, liveMarker);
-    const currentCoordinate = navigationLocation ?? historyCoordinates[historyCoordinates.length - 1] ?? originCoordinate ?? destinationCoordinate;
+    const currentCoordinate =
+      displayNavigationLocation ??
+      historyCoordinates[historyCoordinates.length - 1] ??
+      originCoordinate ??
+      destinationCoordinate;
 
     // 3D is the close navigation view. In 2D keep the complete route visible,
     // including the destination marker, just like CargoLink's route preview.
@@ -554,7 +996,7 @@ export default function TripDetailsScreen() {
           center: currentCoordinate,
           pitch: is3DMode ? NAVIGATION_CAMERA_PITCH : 0,
           heading: nextRoutePoint ? getBearing(currentCoordinate, nextRoutePoint) : 0,
-          zoom: NAVIGATION_CAMERA_ZOOM + 200,
+          zoom: NAVIGATION_CAMERA_ZOOM,
         },
         { duration: 850 },
       );
@@ -572,7 +1014,17 @@ export default function TripDetailsScreen() {
       edgePadding: { top: 90, right: 60, bottom: COLLAPSED_HEIGHT + 40, left: 60 },
       animated: true,
     });
-  }, [is3DMode, isMapReady, isTripStarted, navigationLocation, locationHistory, routePath, currentTrip?.id, routeLoad?.id]);
+  }, [
+    is3DMode,
+    isMapReady,
+    isTripStarted,
+    displayNavigationLocation?.latitude,
+    displayNavigationLocation?.longitude,
+    locationHistory,
+    routePath,
+    currentTrip?.id,
+    routeLoad?.id,
+  ]);
 
   useEffect(() => {
     if (!id || !isTripStarted) return;
@@ -593,81 +1045,184 @@ export default function TripDetailsScreen() {
 
   useEffect(() => {
     if (!currentTrip || !navigationLocation || !isTripStarted) return;
+    if (rerouteInFlightRef.current) return;
 
-    const last = lastRerouteRef.current;
     const now = Date.now();
-    if (
-      last &&
-      now - last.timestamp < REROUTE_MIN_INTERVAL_MS &&
-      getDistanceKm(last.coordinate, navigationLocation) < REROUTE_DISTANCE_THRESHOLD_KM
-    ) {
+    const last = lastRerouteRef.current;
+
+    const activeRoute =
+      routePath.length > 1
+        ? routePath
+        : routeOptions[0]?.coordinates ?? [];
+
+    const distanceFromRouteKm =
+      activeRoute.length > 1
+        ? getDistanceToRouteKm(navigationLocation, activeRoute)
+        : Number.POSITIVE_INFINITY;
+
+    if (activeRoute.length > 1) {
+      if (distanceFromRouteKm >= ROUTE_DEVIATION_THRESHOLD_KM) {
+        offRouteSamplesRef.current += 1;
+      } else {
+        offRouteSamplesRef.current = 0;
+        return;
+      }
+
+      // Duas leituras consecutivas fora da rota evitam recalcular por
+      // uma única oscilação momentânea do GPS.
+      if (offRouteSamplesRef.current < OFF_ROUTE_SAMPLES_REQUIRED) {
+        return;
+      }
+    }
+
+    if (last && now - last.timestamp < REROUTE_MIN_INTERVAL_MS) {
       return;
     }
 
-    let active = true;
-    const { destination, destinationCoordinate } = getTripRouteData(tripForRoute ?? currentTrip);
 
-    const loadLiveRoute = async () => {
+    const {
+      origin,
+      destination,
+      originCoordinate,
+      destinationCoordinate,
+    } = getTripRouteData(tripForRoute ?? currentTrip);
+
+    const routeTarget = isHeadingToPickup
+      ? originCoordinate
+      : destinationCoordinate;
+    const routeTargetLabel = isHeadingToPickup
+      ? origin
+      : destination;
+
+    if (!routeTarget && !routeTargetLabel) return;
+
+    rerouteInFlightRef.current = true;
+    const requestVersion = tripLoadRequestRef.current;
+    const requestCoordinate = navigationLocation;
+
+    void (async () => {
       try {
         setRouteLoading(true);
-        const routes = await googleMapsService.getDrivingRouteSuggestions(
-          navigationLocation,
-          getDirectionsEndpoint(destinationCoordinate, destination),
-        );
-        if (!active) return;
 
-        lastRerouteRef.current = { coordinate: navigationLocation, timestamp: now };
+        const routes = await googleMapsService.getDrivingRouteSuggestions(
+          requestCoordinate,
+          getDirectionsEndpoint(routeTarget, routeTargetLabel),
+        );
+
+        if (requestVersion !== tripLoadRequestRef.current) return;
+
+        lastRerouteRef.current = {
+          coordinate: requestCoordinate,
+          timestamp: Date.now(),
+        };
+        offRouteSamplesRef.current = 0;
+
         if (routes.length > 0) {
           setRouteError(null);
           setRouteOptions(routes);
           setRoutePath(routes[0].coordinates);
         } else {
-          setRouteError('Nao foi encontrada uma nova rota por estrada.');
+          setRouteError('Não foi encontrada uma nova rota por estrada.');
         }
       } catch (error) {
-        if (active) console.error('Failed to refresh live route:', error);
-        if (active) setRouteError(error instanceof Error ? error.message : 'Falha ao recalcular rota do Google.');
-      } finally {
-        if (active) setRouteLoading(false);
-      }
-    };
+        if (requestVersion !== tripLoadRequestRef.current) return;
 
-    void loadLiveRoute();
-    return () => {
-      active = false;
-    };
-  }, [currentTrip?.id, isTripStarted, navigationLocation, locationHistory, routeLoad?.id]);
+        console.error('Failed to refresh live route:', error);
+        setRouteError(
+          error instanceof Error
+            ? error.message
+            : 'Falha ao recalcular rota do Google.',
+        );
+      } finally {
+        if (requestVersion === tripLoadRequestRef.current) {
+          setRouteLoading(false);
+        }
+        rerouteInFlightRef.current = false;
+      }
+    })();
+  }, [
+    currentTrip?.id,
+    isTripStarted,
+    isHeadingToPickup,
+    navigationLocation?.latitude,
+    navigationLocation?.longitude,
+    routePath,
+    routeLoad?.id,
+  ]);
 
   useEffect(() => {
     if (!currentTrip) return;
+
     const historyCoordinates = normalizeTripLocations(locationHistory);
     const coordinate =
       navigationLocation ??
       historyCoordinates[historyCoordinates.length - 1] ??
       getTripRouteData(tripForRoute ?? currentTrip).originCoordinate;
+
     if (!coordinate) {
       setCurrentPlace(null);
+      setCurrentZoneLabel(null);
       return;
     }
+
     let active = true;
 
     const loadCurrentPlace = async () => {
       try {
         setCurrentPlaceLoading(true);
+
         const place = await googleMapsService.reverseGeocodeMozambiqueCoordinate(coordinate);
-        if (active) setCurrentPlace(place);
+        if (!active) return;
+
+        setCurrentPlace(place);
+
+        // Primeiro tenta um bairro/sublocalidade real devolvido pelo geocoder.
+        if (place?.neighborhood) {
+          setCurrentZoneLabel(place.neighborhood);
+          return;
+        }
+
+        // Se o Google não devolver o nome administrativo do bairro,
+        // procura a referência identificável mais próxima das coordenadas.
+        const nearby = await googleMapsService.getNearbyDestinationPlaces(coordinate);
+        if (!active) return;
+
+        const nearest = [...nearby].sort(
+          (a, b) =>
+            getDistanceKm(coordinate, a.coordinate) -
+            getDistanceKm(coordinate, b.coordinate),
+        )[0];
+
+        const fallbackZone =
+          nearest?.name
+            ? `Zona de ${nearest.name}`
+            : place?.city ??
+              place?.district ??
+              place?.name?.split(',')[0]?.trim() ??
+              'Zona desconhecida';
+
+        setCurrentZoneLabel(fallbackZone);
       } catch {
-        if (active) setCurrentPlace(null);
+        if (active) {
+          setCurrentPlace(null);
+          setCurrentZoneLabel('Zona desconhecida');
+        }
       } finally {
         if (active) setCurrentPlaceLoading(false);
       }
     };
 
     void loadCurrentPlace();
+
     return () => {
       active = false;
     };
-  }, [currentTrip?.id, navigationLocation?.latitude, navigationLocation?.longitude, locationHistory, routeLoad?.id]);
+  }, [
+    currentTrip?.id,
+    navigationLocation?.latitude,
+    navigationLocation?.longitude,
+    routeLoad?.id,
+  ]);
 
   const onRefresh = () => {
     setRefreshing(true);
@@ -681,6 +1236,7 @@ export default function TripDetailsScreen() {
       const updated = await tripService.startPickupTrip(id);
       setTrip(updated);
       applyTripSnapshot(updated);
+      void loadData(true);
       showDialog('Indo Carregar', 'Iniciou o deslocamento para o local de carregamento. O mapa irá guiá-lo à Origem.', 'success');
     } catch (error) {
       console.error('Failed to start pickup trip:', error);
@@ -697,6 +1253,7 @@ export default function TripDetailsScreen() {
       const updated = await tripService.arrivePickupTrip(id);
       setTrip(updated);
       applyTripSnapshot(updated);
+      void loadData(true);
       showDialog('Chegou à Origem', 'Confirmou a chegada ao local de carregamento.', 'success');
     } catch (error) {
       console.error('Failed to confirm pickup arrival:', error);
@@ -713,6 +1270,7 @@ export default function TripDetailsScreen() {
       const updated = await tripService.confirmLoadedTrip(id);
       setTrip(updated);
       applyTripSnapshot(updated);
+      void loadData(true);
       showDialog('Carga Carregada', 'Confirmou o carregamento da carga no camião. Pode iniciar a viagem de entrega!', 'success');
     } catch (error) {
       console.error('Failed to confirm loaded:', error);
@@ -724,12 +1282,36 @@ export default function TripDetailsScreen() {
 
   const handleStartTrip = async () => {
     if (!id) return;
+
     try {
       setStarting(true);
-      const updated = await tripService.startTrip(id);
+
+      const routeDistanceKm =
+        parseGoogleDistanceKm(routeOptions[0]?.distanceText) ??
+        (routePath.length > 1 ? getPolylineDistanceKm(routePath) : null);
+
+      const routeEstimatedTime =
+        routeOptions[0]?.durationText ??
+        currentTrip?.estimated_time ??
+        undefined;
+
+      const updated = await tripService.startTrip(id, {
+        total_distance_km:
+          routeDistanceKm != null && routeDistanceKm > 0
+            ? Number(routeDistanceKm.toFixed(2))
+            : undefined,
+        estimated_time: routeEstimatedTime,
+      });
+
       setTrip(updated);
       applyTripSnapshot(updated);
-      showDialog('Viagem iniciada', 'A viagem de entrega foi iniciada com sucesso. A localização será enviada automaticamente.', 'success');
+      void loadData(true);
+
+      showDialog(
+        'Viagem iniciada',
+        'A viagem de entrega foi iniciada com sucesso. Distância, tempo estimado e localização serão acompanhados automaticamente.',
+        'success',
+      );
     } catch (error) {
       console.error('Failed to start trip:', error);
       showDialog('Erro', 'Não foi possível iniciar a viagem de entrega.', 'error');
@@ -761,24 +1343,88 @@ export default function TripDetailsScreen() {
 
   const load = currentTrip.load;
   const { origin, destination, loadTitle, originCoordinate, destinationCoordinate } = getTripRouteData(tripForRoute ?? currentTrip);
-  const hasDrivingRoute = routePath.length > 1;
-  // Keep the origin and destination connected in the normal map even while
-  // Google is loading or unavailable; the dashed grey line is only a visual
-  // fallback, never presented as a drivable instruction.
-  const baseRouteCoordinates = hasDrivingRoute
-    ? routePath
-    : [originCoordinate, destinationCoordinate].filter((coordinate): coordinate is Coordinate => coordinate !== null);
-  const routeCoordinates = ensureRouteEndsAtDestination(baseRouteCoordinates, destinationCoordinate);
-  const historyCoordinates = normalizeTripLocations(locationHistory);
-  const liveMarker = isTripStarted ? navigationLocation : null;
-  const traveledRouteCoordinates = buildTraveledRouteCoordinates(historyCoordinates, liveMarker);
   const primaryRoute = routeOptions[0];
+
+  // Nunca desenha uma linha recta artificial entre dois pontos.
+  // A rota visual vem exclusivamente da geometria real do Google Directions.
+  // Se routePath estiver temporariamente vazio mas routeOptions já tiver a
+  // geometria carregada, usa-a como fallback seguro.
+  const routeCoordinates =
+    routePath.length > 1
+      ? routePath
+      : primaryRoute?.coordinates && primaryRoute.coordinates.length > 1
+        ? primaryRoute.coordinates
+        : [];
+
+  const hasDrivingRoute = routeCoordinates.length > 1;
+  const historyCoordinates = normalizeTripLocations(locationHistory);
+  const liveMarker = isTripStarted ? displayNavigationLocation : null;
+  const traveledRouteCoordinates = buildTraveledRouteCoordinates(historyCoordinates, liveMarker);
   const currentCoordinate =
-    navigationLocation ?? historyCoordinates[historyCoordinates.length - 1] ?? originCoordinate ?? destinationCoordinate ?? DEFAULT_MAP_CENTER;
-  const traveledRoadCoordinates = getTraveledRoadCoordinates(currentCoordinate, routeCoordinates, isTripStarted);
-  const guidanceRoute = splitGuidanceRoute(currentCoordinate, routeCoordinates, isTripStarted);
-  const nextStep = getNextNavigationStep(currentCoordinate, primaryRoute?.steps ?? []);
-  const progress = getProgressValue(currentTrip);
+    displayNavigationLocation ??
+    historyCoordinates[historyCoordinates.length - 1] ??
+    originCoordinate ??
+    destinationCoordinate ??
+    DEFAULT_MAP_CENTER;
+
+  // A imagem fornecida aponta com a cabine para o topo, por isso 0º = Norte.
+  const truckMarkerRotation = driverBearing;
+
+  const routeDistanceKm =
+    parseGoogleDistanceKm(primaryRoute?.distanceText) ??
+    (routeCoordinates.length > 1 ? getPolylineDistanceKm(routeCoordinates) : null);
+
+  const trackedDistanceKm = getTrackedDistanceKm(locationHistory);
+
+  const displayedTotalDistanceKm =
+    currentTrip.total_distance_km ??
+    routeDistanceKm;
+
+  const displayedTraveledDistanceKm =
+    currentTrip.traveled_distance_km ??
+    (trackedDistanceKm > 0 ? trackedDistanceKm : 0);
+
+  const displayedEstimatedTime =
+    currentTrip.estimated_time ||
+    primaryRoute?.durationText ||
+    '—';
+
+  const routeProgressSegments = splitRouteAtCurrentPosition(
+    currentCoordinate,
+    routeCoordinates,
+    isTripStarted,
+  );
+  const nextStep = getNextNavigationStep(
+    currentCoordinate,
+    primaryRoute?.steps ?? [],
+  );
+  const currentRoadName =
+    extractRoadNameFromInstruction(nextStep?.instruction) ??
+    (
+      primaryRoute?.summary &&
+      primaryRoute.summary !== 'Google Maps'
+        ? primaryRoute.summary
+        : null
+    ) ??
+    'Estrada desconhecida';
+
+  const calculatedProgress =
+    displayedTotalDistanceKm != null &&
+    displayedTotalDistanceKm > 0 &&
+    displayedTraveledDistanceKm != null
+      ? Math.max(
+          0,
+          Math.min(
+            100,
+            (displayedTraveledDistanceKm / displayedTotalDistanceKm) * 100,
+          ),
+        )
+      : 0;
+
+  const progress =
+    currentStatus === 'concluida'
+      ? 100
+      : Math.max(getProgressValue(currentTrip), calculatedProgress);
   const canStartPickup = currentStatus === 'aguardando_inicio';
   const canArrivePickup = currentStatus === 'indo_carregar';
   const canConfirmLoaded = currentStatus === 'chegou_origem';
@@ -787,6 +1433,7 @@ export default function TripDetailsScreen() {
   const isNearDestination = distanceToDestination === null || distanceToDestination <= 0.02;
   const canArrive = currentStatus === 'viagem_iniciada';
   const showFooter = canStartPickup || canArrivePickup || canConfirmLoaded || canStartDelivery || currentStatus === 'viagem_iniciada';
+  const journeyStages = getJourneyStages(currentTrip, currentStatus);
   // For pickup phases point the map region towards origin; otherwise destination.
   const activeTarget = isHeadingToPickup ? originCoordinate : destinationCoordinate;
   const routeStartForRegion = originCoordinate ?? currentCoordinate;
@@ -814,11 +1461,12 @@ export default function TripDetailsScreen() {
           style={StyleSheet.absoluteFill}
           provider={PROVIDER_GOOGLE}
           mapType="standard"
-          customMapStyle={DARK_MAP_STYLE}
           pitchEnabled
           rotateEnabled
           showsBuildings
           showsCompass={false}
+          showsUserLocation={false}
+          showsMyLocationButton={driverLocationPermissionGranted}
           initialRegion={{
             latitude: currentCoordinate.latitude,
             longitude: currentCoordinate.longitude,
@@ -828,40 +1476,58 @@ export default function TripDetailsScreen() {
           onMapReady={() => setIsMapReady(true)}
           loadingEnabled
           loadingIndicatorColor={FretixColors.yellow}
+          loadingBackgroundColor="#E5E7EB" 
         >
-          {routeCoordinates.length > 1 ? (
+          {routeProgressSegments.remaining.length > 1 ? (
             <Polyline
-              coordinates={routeCoordinates}
-              strokeColor="rgba(156,163,175,0.78)"
-              strokeWidth={4}
-              lineDashPattern={hasDrivingRoute ? undefined : [8, 6]}
-              zIndex={1}
+              coordinates={routeProgressSegments.remaining}
+              strokeColor="#FFC107"
+              strokeWidth={7}
+              lineCap="round"
+              lineJoin="round"
+              zIndex={4}
             />
           ) : null}
-          {hasDrivingRoute && isTripStarted && guidanceRoute.preview.length > 1 ? (
+          {routeProgressSegments.traveled.length > 1 ? (
             <Polyline
-              coordinates={guidanceRoute.preview}
-              strokeColor="#22C55E"
-              strokeWidth={4}
-              zIndex={3}
+              coordinates={routeProgressSegments.traveled}
+              strokeColor="#8A94A3"
+              strokeWidth={6}
+              lineCap="round"
+              lineJoin="round"
+              zIndex={5}
             />
           ) : null}
-          {hasDrivingRoute && guidanceRoute.highlighted.length > 1 ? (
-            <Polyline coordinates={guidanceRoute.highlighted} strokeColor="#FFC107" strokeWidth={7} zIndex={4} />
-          ) : null}
-          {traveledRoadCoordinates.length > 1 ? (
-            <Polyline coordinates={traveledRoadCoordinates} strokeColor="rgba(148,163,184,0.55)" strokeWidth={4} zIndex={2} />
+          {!hasDrivingRoute && !routeLoading ? (
+            <View />
           ) : null}
           {originCoordinate ? <Marker coordinate={originCoordinate} title="Origem" description={origin} pinColor="#3B82F6" zIndex={5} /> : null}
           {destinationCoordinate ? <Marker coordinate={destinationCoordinate} title="Destino" description={destination} pinColor={FretixColors.yellow} zIndex={6} /> : null}
           {liveMarker ? (
-            <Marker coordinate={liveMarker} title="Localização atual">
-              <View style={styles.driverMarker}>
-                <Ionicons name="navigate" size={18} color="#0B0F14" />
-              </View>
-            </Marker>
+            <Marker.Animated
+              coordinate={driverAnimatedCoordinate}
+              title="Camião em movimento"
+              description={
+                currentTrip.vehicle?.plate
+                  ? `Matrícula ${currentTrip.vehicle.plate}`
+                  : 'Localização actual do motorista'
+              }
+              image={require('../../assets/truck_marker.png')}
+              anchor={{ x: 0.5, y: 0.5 }}
+              flat
+              rotation={truckMarkerRotation}
+              zIndex={20}
+              tracksViewChanges={false}
+            />
           ) : null}
         </MapView>
+
+        {isTripStarted && !hasDrivingRoute && routeLoading ? (
+          <View style={styles.routeRecalculatingBadge} pointerEvents="none">
+            <ActivityIndicator size="small" color="#0B0F14" />
+            <Text style={styles.routeRecalculatingText}>A calcular estrada...</Text>
+          </View>
+        ) : null}
 
         {isTripStarted ? (
           <View style={styles.navigationCard} pointerEvents="none">
@@ -876,6 +1542,9 @@ export default function TripDetailsScreen() {
               </Text>
               <Text style={styles.navigationInstruction} numberOfLines={2}>
                 {nextStep?.instruction ?? `Siga para ${destination}`}
+              </Text>
+              <Text style={styles.navigationRoad} numberOfLines={1}>
+                {currentRoadName}
               </Text>
             </View>
           </View>
@@ -978,15 +1647,15 @@ export default function TripDetailsScreen() {
             <View style={styles.metricsRow}>
               <View style={styles.metricCell}>
                 <Text style={styles.metricLabel}>Distância total</Text>
-                <Text style={styles.metricValue}>{formatDistance(currentTrip.total_distance_km)}</Text>
+                <Text style={styles.metricValue}>{formatDistance(displayedTotalDistanceKm)}</Text>
               </View>
               <View style={styles.metricCell}>
                 <Text style={styles.metricLabel}>Percorrida</Text>
-                <Text style={styles.metricValue}>{formatDistance(currentTrip.traveled_distance_km)}</Text>
+                <Text style={styles.metricValue}>{formatDistance(displayedTraveledDistanceKm)}</Text>
               </View>
               <View style={styles.metricCell}>
                 <Text style={styles.metricLabel}>Tempo estimado</Text>
-                <Text style={styles.metricValue}>{currentTrip.estimated_time || '—'}</Text>
+                <Text style={styles.metricValue}>{displayedEstimatedTime}</Text>
               </View>
             </View>
           </View>
@@ -998,6 +1667,14 @@ export default function TripDetailsScreen() {
                 <Ionicons name="sparkles" size={16} color={FretixColors.yellow} />
                 <Text style={styles.routeSuggestionText}>
                   Google Maps: {primaryRoute.summary || 'rota sugerida'} · {primaryRoute.distanceText} · {primaryRoute.durationText}
+                </Text>
+              </View>
+            ) : null}
+            {primaryRoute ? (
+              <View style={styles.roadNameRow}>
+                <Ionicons name="trail-sign-outline" size={16} color={FretixColors.yellow} />
+                <Text style={styles.roadNameText}>
+                  Estrada actual: {currentRoadName}
                 </Text>
               </View>
             ) : null}
@@ -1020,22 +1697,24 @@ export default function TripDetailsScreen() {
                 <Text style={styles.realtimeSharingTitle}>Partilha de localização</Text>
               </View>
               <Text style={styles.realtimeSharingText}>
-                {shouldShareDriverLocation
+                {shouldTrackDriverLocation
                   ? isDriverLocationSharing
-                    ? 'A localização é enviada ao servidor a cada 10 segundos quando a posição muda.'
+                    ? shouldPersistDriverLocation
+                      ? 'GPS activo. A localização é enviada ao servidor quando a posição muda.'
+                      : 'GPS activo para navegação até à origem. O envio ao servidor começa quando iniciar a viagem de entrega.'
                     : driverLocationSharingStatus === 'requesting_permission'
                       ? 'A solicitar permissão de localização...'
                       : driverLocationSharingStatus === 'error'
                         ? driverLocationError ?? 'Erro ao iniciar o rastreamento.'
-                        : 'A iniciar o rastreamento...'
-                  : 'O envio automático é ativado quando a viagem estiver em andamento.'}
+                        : 'A iniciar o GPS...'
+                  : 'O GPS de navegação é activado quando iniciar o deslocamento.'}
               </Text>
               {driverLocationLastSentAt ? (
                 <Text style={styles.realtimeSharingMeta}>
                   Último envio ao servidor: {formatDateTime(driverLocationLastSentAt)}
                 </Text>
               ) : null}
-              {shouldShareDriverLocation && !driverLocationPermissionGranted && driverLocationSharingStatus === 'error' ? (
+              {shouldTrackDriverLocation && !driverLocationPermissionGranted && driverLocationSharingStatus === 'error' ? (
                 <Text style={styles.realtimeSharingWarning}>
                   Sem permissão, a empresa e o cliente não receberão a sua posição em tempo real.
                 </Text>
@@ -1049,12 +1728,12 @@ export default function TripDetailsScreen() {
                 </View>
                 <View style={{ flex: 1 }}>
                   <Text style={styles.currentLocationTitle}>
-                    {liveLocation ? 'Localização atual em tempo real' : 'Localização estimada'}
+                    {driverDeviceLocation || liveLocation ? 'Localização atual em tempo real' : 'Localização estimada'}
                   </Text>
                   <Text style={styles.currentLocationSubtitle}>
                     {currentPlaceLoading
                       ? 'A identificar província, cidade e bairro...'
-                      : currentPlace?.name ?? (liveLocation ? 'Posição enviada pelo motorista' : 'Ponto de origem')}
+                      : currentPlace?.name ?? (driverDeviceLocation || liveLocation ? 'Posição actual do motorista' : 'Ponto de origem')}
                   </Text>
                 </View>
               </View>
@@ -1069,11 +1748,11 @@ export default function TripDetailsScreen() {
                 </View>
                 <View style={styles.locationCell}>
                   <Text style={styles.locationLabel}>Bairro/Zona</Text>
-                  <Text style={styles.locationValue} numberOfLines={1}>{currentPlace?.neighborhood ?? '—'}</Text>
+                  <Text style={styles.locationValue} numberOfLines={1}>{currentZoneLabel ?? 'Zona desconhecida'}</Text>
                 </View>
                 <View style={styles.locationCell}>
                   <Text style={styles.locationLabel}>Coordenadas</Text>
-                  <Text style={styles.locationValue} numberOfLines={1}>{formatCoordinate(currentCoordinate)}</Text>
+                  <Text style={styles.locationValue} numberOfLines={1}>{formatCoordinate(navigationLocation ?? currentCoordinate)}</Text>
                 </View>
               </View>
               {lastLocationUpdateAt ? (
@@ -1209,30 +1888,113 @@ export default function TripDetailsScreen() {
             )}
           </View>
 
-          {/* ── Activity Timeline ── */}
-          {currentTrip.activities && currentTrip.activities.length > 0 ? (
-            <View style={styles.card}>
-              <Text style={styles.cardTitle}>Atividades da Viagem</Text>
-              {currentTrip.activities.map((act, index) => {
-                const isLast = index === currentTrip.activities!.length - 1;
+          {/* ── Activity Road ── */}
+          <View style={styles.card}>
+            <View style={styles.activityHeaderRow}>
+              <View>
+                <Text style={styles.cardTitle}>Atividades da Viagem</Text>
+              </View>
+              <View style={styles.activityLegend}>
+                <Ionicons name="checkmark-circle" size={16} color="#22C55E" />
+                <Text style={styles.activityLegendText}>Concluída</Text>
+              </View>
+            </View>
+
+            <View style={styles.activityRoadWrap}>
+              {journeyStages.map((stage, index) => {
+                const isLast = index === journeyStages.length - 1;
+                const nextStage = journeyStages[index + 1];
+                const roadCompleted =
+                  stage.state === 'completed' &&
+                  nextStage?.state !== 'upcoming';
+
                 return (
-                  <View key={act.id} style={styles.activityRow}>
-                    <View style={styles.activityTimelineCol}>
-                      <View style={[styles.activityDot, isLast && styles.activityDotActive]} />
-                      {!isLast ? <View style={styles.activityLine} /> : null}
-                    </View>
-                    <View style={styles.activityContent}>
-                      <Text style={styles.activityTitle}>{act.title}</Text>
-                      {act.description ? (
-                        <Text style={styles.activityDesc}>{act.description}</Text>
+                  <View key={stage.key} style={styles.activityRoadRow}>
+                    <View style={styles.activityRoadColumn}>
+                      {!isLast ? (
+                        <>
+                          <View style={styles.activityRoadBase} />
+                          {roadCompleted ? (
+                            <View style={styles.activityRoadCompleted} />
+                          ) : null}
+                        </>
                       ) : null}
-                      <Text style={styles.activityTime}>{formatDateTime(act.created_at)}</Text>
+
+                      {stage.state === 'completed' ? (
+                        <View style={styles.activityCheckMarker}>
+                          <Ionicons
+                            name="checkmark"
+                            size={17}
+                            color="#FFFFFF"
+                          />
+                        </View>
+                      ) : stage.state === 'active' ? (
+                        <View style={styles.activityTruckMarker}>
+                          <View style={styles.activityTruckHalo} />
+                          <Image
+                            source={require('../../assets/truck_marker.png')}
+                            style={styles.activityTruckImage}
+                            resizeMode="contain"
+                          />
+                        </View>
+                      ) : (
+                        <View style={styles.activityUpcomingMarker}>
+                          <View style={styles.activityUpcomingDot} />
+                        </View>
+                      )}
+                    </View>
+
+                    <View
+                      style={[
+                        styles.activityStageCard,
+                        stage.state === 'active' &&
+                          styles.activityStageCardActive,
+                      ]}
+                    >
+                      <View style={styles.activityStageTop}>
+                        <Text
+                          style={[
+                            styles.activityStageTitle,
+                            stage.state === 'completed' &&
+                              styles.activityStageTitleCompleted,
+                            stage.state === 'upcoming' &&
+                              styles.activityStageTitleUpcoming,
+                          ]}
+                        >
+                          {stage.title}
+                        </Text>
+
+                        {stage.state === 'active' ? (
+                          <View style={styles.activityActiveBadge}>
+                            <View style={styles.activityActivePulse} />
+                            <Text style={styles.activityActiveBadgeText}>
+                              Em curso
+                            </Text>
+                          </View>
+                        ) : null}
+                      </View>
+
+                      <Text
+                        style={[
+                          styles.activityStageSubtitle,
+                          stage.state === 'upcoming' &&
+                            styles.activityStageSubtitleUpcoming,
+                        ]}
+                      >
+                        {stage.subtitle}
+                      </Text>
+
+                      {stage.time ? (
+                        <Text style={styles.activityStageTime}>
+                          {formatDateTime(stage.time)}
+                        </Text>
+                      ) : null}
                     </View>
                   </View>
                 );
               })}
             </View>
-          ) : null}
+          </View>
         </ScrollView>
 
         {showFooter ? (
@@ -1370,6 +2132,26 @@ const styles = StyleSheet.create({
   headerTitle: { color: FretixColors.white, fontSize: 15, fontWeight: '700' },
   headerSub: { color: '#8D949E', fontSize: 12, marginTop: 1 },
   mapWrap: { flex: 1, position: 'relative' },
+  routeRecalculatingBadge: {
+    position: 'absolute',
+    top: 16,
+    alignSelf: 'center',
+    zIndex: 20,
+    minHeight: 38,
+    borderRadius: 999,
+    paddingHorizontal: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: FretixColors.yellow,
+    borderWidth: 1,
+    borderColor: 'rgba(0,0,0,0.12)',
+  },
+  routeRecalculatingText: {
+    color: '#0B0F14',
+    fontSize: 12,
+    fontWeight: '900',
+  },
   navigationCard: {
     position: 'absolute',
     top: 12,
@@ -1398,15 +2180,21 @@ const styles = StyleSheet.create({
   navigationTexts: { flex: 1 },
   navigationDistance: { color: FretixColors.yellow, fontSize: 13, fontWeight: '900', marginBottom: 3 },
   navigationInstruction: { color: FretixColors.white, fontSize: 16, fontWeight: '800', lineHeight: 20 },
-  driverMarker: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    backgroundColor: '#22C55E',
-    borderWidth: 3,
-    borderColor: '#ECFDF5',
+  navigationRoad: { color: '#AAB2BE', fontSize: 12, fontWeight: '700', marginTop: 3 },
+  truckMarkerWrap: {
+    width: 46,
+    height: 86,
     alignItems: 'center',
     justifyContent: 'center',
+    shadowColor: '#000000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.35,
+    shadowRadius: 5,
+    elevation: 12,
+  },
+  truckMarkerImage: {
+    width: 42,
+    height: 82,
   },
   destinationPlaceLabel: {
     maxWidth: 145,
@@ -1582,6 +2370,24 @@ const styles = StyleSheet.create({
     paddingVertical: 9,
   },
   routeWarningText: { flex: 1, color: '#FECACA', fontSize: 12, fontWeight: '700', lineHeight: 16 },
+  roadNameRow: {
+    marginTop: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255,193,7,0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,193,7,0.18)',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  roadNameText: {
+    flex: 1,
+    color: '#E5E7EB',
+    fontSize: 12,
+    fontWeight: '700',
+  },
   realtimeSharingPanel: {
     borderRadius: 16,
     borderWidth: 1,
@@ -1704,54 +2510,190 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   secondaryBtnText: { color: FretixColors.white, fontSize: 15, fontWeight: '700' },
-  // Activity Timeline
-  activityRow: {
+  // Activity Road
+  activityHeaderRow: {
     flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
     gap: 12,
-    marginBottom: 0,
   },
-  activityTimelineCol: {
-    alignItems: 'center',
-    width: 16,
-    paddingTop: 3,
-  },
-  activityDot: {
-    width: 12,
-    height: 12,
-    borderRadius: 6,
-    backgroundColor: 'rgba(255,255,255,0.2)',
-    borderWidth: 2,
-    borderColor: 'rgba(255,255,255,0.35)',
-  },
-  activityDotActive: {
-    backgroundColor: FretixColors.yellow,
-    borderColor: FretixColors.yellow,
-  },
-  activityLine: {
-    flex: 1,
-    width: 2,
-    backgroundColor: 'rgba(255,255,255,0.1)',
+  activityHeaderSubtitle: {
+    color: '#7F8996',
+    fontSize: 11,
+    lineHeight: 16,
     marginTop: 4,
-    marginBottom: 4,
-    minHeight: 20,
   },
-  activityContent: {
+  activityLegend: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 9,
+    paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: 'rgba(34,197,94,0.10)',
+    borderWidth: 1,
+    borderColor: 'rgba(34,197,94,0.22)',
+  },
+  activityLegendText: {
+    color: '#86EFAC',
+    fontSize: 10,
+    fontWeight: '800',
+  },
+  activityRoadWrap: {
+    marginTop: 18,
+  },
+  activityRoadRow: {
+    minHeight: 94,
+    flexDirection: 'row',
+    alignItems: 'stretch',
+  },
+  activityRoadColumn: {
+    width: 52,
+    alignItems: 'center',
+    position: 'relative',
+  },
+  activityRoadBase: {
+    position: 'absolute',
+    top: 30,
+    bottom: -6,
+    width: 7,
+    borderRadius: 999,
+    backgroundColor: '#35404D',
+  },
+  activityRoadCompleted: {
+    position: 'absolute',
+    top: 30,
+    bottom: -6,
+    width: 7,
+    borderRadius: 999,
+    backgroundColor: '#22C55E',
+  },
+  activityCheckMarker: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    backgroundColor: '#22C55E',
+    borderWidth: 3,
+    borderColor: '#DDFBE7',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 5,
+    shadowColor: '#22C55E',
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 4,
+  },
+  activityTruckMarker: {
+    width: 44,
+    height: 56,
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 8,
+    marginTop: -10,
+  },
+  activityTruckHalo: {
+    position: 'absolute',
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255,193,7,0.18)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,193,7,0.42)',
+  },
+  activityTruckImage: {
+    width: 27,
+    height: 52,
+    // Na linha de actividades o percurso visual avança de cima para baixo.
+    // O camião deve apontar para baixo para transmitir que está a avançar
+    // para a próxima etapa, e não a regressar às etapas concluídas.
+    transform: [{ rotate: '180deg' }],
+  },
+  activityUpcomingMarker: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: '#121923',
+    borderWidth: 2,
+    borderColor: '#4B5563',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 5,
+  },
+  activityUpcomingDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+    backgroundColor: '#6B7280',
+  },
+  activityStageCard: {
     flex: 1,
-    paddingBottom: 18,
+    minHeight: 74,
+    marginLeft: 6,
+    marginBottom: 16,
+    borderRadius: 14,
+    paddingVertical: 11,
+    paddingHorizontal: 13,
+    backgroundColor: '#0E151E',
+    borderWidth: 1,
+    borderColor: '#212C39',
   },
-  activityTitle: {
+  activityStageCardActive: {
+    backgroundColor: 'rgba(255,193,7,0.065)',
+    borderColor: 'rgba(255,193,7,0.36)',
+  },
+  activityStageTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  activityStageTitle: {
+    flex: 1,
     color: FretixColors.white,
     fontSize: 13,
-    fontWeight: '700',
+    fontWeight: '800',
   },
-  activityDesc: {
-    color: '#8D949E',
-    fontSize: 12,
-    marginTop: 2,
+  activityStageTitleCompleted: {
+    color: '#BBF7D0',
   },
-  activityTime: {
-    color: '#6B7280',
+  activityStageTitleUpcoming: {
+    color: '#7D8793',
+  },
+  activityStageSubtitle: {
+    color: '#A6AFBA',
     fontSize: 11,
+    lineHeight: 16,
     marginTop: 4,
+  },
+  activityStageSubtitleUpcoming: {
+    color: '#606B78',
+  },
+  activityStageTime: {
+    color: '#6E7A88',
+    fontSize: 10,
+    fontWeight: '600',
+    marginTop: 5,
+  },
+  activityActiveBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255,193,7,0.13)',
+  },
+  activityActivePulse: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: FretixColors.yellow,
+  },
+  activityActiveBadgeText: {
+    color: FretixColors.yellow,
+    fontSize: 9,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
   },
 });

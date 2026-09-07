@@ -10,6 +10,7 @@
     "expo-auth-session": "~56.0.13",
     "expo-constants": "~56.0.16",
     "expo-crypto": "^56.0.4",
+    "expo-dev-client": "~56.0.26",
     "expo-image-picker": "~56.0.22",
     "expo-linking": "~56.0.13",
     "expo-location": "~56.0.22",

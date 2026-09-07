@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import * as Location from 'expo-location';
+import axios from 'axios';
 
 import { useWebSocket } from '@/context/WebSocketContext';
 import { tripService } from '@/services/trips';
@@ -7,6 +8,11 @@ import { tripService } from '@/services/trips';
 type UseDriverTripLocationSharingOptions = {
   tripId: number | null;
   enabled: boolean;
+  /**
+   * Mantém o GPS local a funcionar mesmo quando false, mas não envia
+   * a posição ao backend/WebSocket. Útil nas fases antes de viagem_iniciada.
+   */
+  persistToServer?: boolean;
 };
 
 type SharingStatus = 'idle' | 'requesting_permission' | 'watching' | 'error';
@@ -26,9 +32,14 @@ function toNullableNumber(value: unknown): number | undefined {
 }
 
 function toSpeedKmH(speedMetersPerSecond: number | null | undefined) {
-  if (typeof speedMetersPerSecond !== 'number' || !Number.isFinite(speedMetersPerSecond) || speedMetersPerSecond < 0) {
+  if (
+    typeof speedMetersPerSecond !== 'number' ||
+    !Number.isFinite(speedMetersPerSecond) ||
+    speedMetersPerSecond < 0
+  ) {
     return undefined;
   }
+
   return Math.round(speedMetersPerSecond * 3.6);
 }
 
@@ -39,8 +50,13 @@ function coordinatesChanged(a: LocationPayload, b: LocationPayload) {
   );
 }
 
-export function useDriverTripLocationSharing({ tripId, enabled }: UseDriverTripLocationSharingOptions) {
+export function useDriverTripLocationSharing({
+  tripId,
+  enabled,
+  persistToServer = true,
+}: UseDriverTripLocationSharingOptions) {
   const { publishDriverLocation } = useWebSocket();
+
   const [isSharing, setIsSharing] = useState(false);
   const [sharingStatus, setSharingStatus] = useState<SharingStatus>('idle');
   const [permissionGranted, setPermissionGranted] = useState(false);
@@ -60,13 +76,16 @@ export function useDriverTripLocationSharing({ tripId, enabled }: UseDriverTripL
     const cleanup = () => {
       watcherRef.current?.remove();
       watcherRef.current = null;
+
       if (intervalRef.current) {
         clearInterval(intervalRef.current);
         intervalRef.current = null;
       }
+
       latestPositionRef.current = null;
       lastSentRef.current = null;
       sendingRef.current = false;
+
       if (mounted) {
         setIsSharing(false);
         setSharingStatus('idle');
@@ -76,6 +95,7 @@ export function useDriverTripLocationSharing({ tripId, enabled }: UseDriverTripL
 
     if (!enabled || !tripId) {
       cleanup();
+
       return () => {
         mounted = false;
         cleanup();
@@ -83,31 +103,60 @@ export function useDriverTripLocationSharing({ tripId, enabled }: UseDriverTripL
     }
 
     const sendLocationToServer = async (payload: LocationPayload) => {
+      if (!persistToServer) return;
       if (sendingRef.current) return;
-      if (lastSentRef.current && !coordinatesChanged(lastSentRef.current, payload)) return;
+
+      if (
+        lastSentRef.current &&
+        !coordinatesChanged(lastSentRef.current, payload)
+      ) {
+        return;
+      }
 
       sendingRef.current = true;
+
       try {
         await tripService.addTripLocation(tripId, {
           latitude: payload.latitude,
           longitude: payload.longitude,
           speed: payload.speed,
         });
+
         lastSentRef.current = payload;
+
         if (mounted) {
           setLastSentAt(new Date().toISOString());
         }
       } catch (error) {
-        console.error('Failed to send trip location via HTTP:', error);
+        if (axios.isAxiosError(error)) {
+          console.error(
+            'Failed to send trip location via HTTP:',
+            'status=',
+            error.response?.status,
+            'data=',
+            error.response?.data,
+          );
+        } else {
+          console.error('Failed to send trip location via HTTP:', error);
+        }
       } finally {
         sendingRef.current = false;
       }
     };
 
     const tickHttpSend = () => {
+      if (!persistToServer) return;
+
       const latest = latestPositionRef.current;
       if (!latest) return;
-      if (lastSentRef.current && !coordinatesChanged(lastSentRef.current, latest)) return;
+
+      if (
+        lastSentRef.current &&
+        !coordinatesChanged(lastSentRef.current, latest)
+      ) {
+        return;
+      }
+
       void sendLocationToServer(latest);
     };
 
@@ -139,14 +188,15 @@ export function useDriverTripLocationSharing({ tripId, enabled }: UseDriverTripL
 
         const subscription = await Location.watchPositionAsync(
           {
-            accuracy: Location.Accuracy.Balanced,
-            timeInterval: 5000,
-            distanceInterval: 10,
+            accuracy: Location.Accuracy.High,
+            timeInterval: 3000,
+            distanceInterval: 5,
             mayShowUserSettingsDialog: true,
           },
           (position) => {
             const latitude = toNullableNumber(position.coords.latitude);
             const longitude = toNullableNumber(position.coords.longitude);
+
             if (latitude == null || longitude == null) return;
 
             const payload: LocationPayload = {
@@ -156,26 +206,40 @@ export function useDriverTripLocationSharing({ tripId, enabled }: UseDriverTripL
             };
 
             latestPositionRef.current = payload;
-            // The navigation camera must follow the driver's phone immediately;
-            // waiting for the WebSocket echo makes guidance look stuck on the
-            // overview map when the connection is slow.
-            if (mounted) setCurrentLocation(payload);
 
-            publishDriverLocation({
-              tripId,
-              latitude,
-              longitude,
-              speed: payload.speed,
-            });
+            // Sempre actualiza o mapa local imediatamente.
+            if (mounted) {
+              setCurrentLocation(payload);
+            }
+
+            // Só publica para o servidor quando a fase da viagem permite.
+            if (persistToServer) {
+              publishDriverLocation({
+                tripId,
+                latitude,
+                longitude,
+                speed: payload.speed,
+              });
+            }
           },
         );
 
         watcherRef.current = subscription;
-        intervalRef.current = setInterval(tickHttpSend, HTTP_SEND_INTERVAL_MS);
+
+        if (persistToServer) {
+          intervalRef.current = setInterval(
+            tickHttpSend,
+            HTTP_SEND_INTERVAL_MS,
+          );
+        }
 
         if (!mounted) {
           subscription.remove();
-          if (intervalRef.current) clearInterval(intervalRef.current);
+
+          if (intervalRef.current) {
+            clearInterval(intervalRef.current);
+          }
+
           return;
         }
 
@@ -183,7 +247,9 @@ export function useDriverTripLocationSharing({ tripId, enabled }: UseDriverTripL
         setSharingStatus('watching');
       } catch (error) {
         console.error('Failed to start driver location sharing:', error);
+
         if (!mounted) return;
+
         setSharingStatus('error');
         setErrorMessage('Não foi possível iniciar a partilha de localização.');
       }
@@ -195,7 +261,7 @@ export function useDriverTripLocationSharing({ tripId, enabled }: UseDriverTripL
       mounted = false;
       cleanup();
     };
-  }, [enabled, tripId, publishDriverLocation]);
+  }, [enabled, tripId, persistToServer, publishDriverLocation]);
 
   return {
     isSharing,
