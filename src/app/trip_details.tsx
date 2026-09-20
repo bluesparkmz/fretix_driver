@@ -32,7 +32,9 @@ import {
   type MozambiquePlaceSuggestion,
 } from '@/services/google-maps';
 import { loadService, type LoadDetail } from '@/services/loads';
+import { tripEvidenceService, type TripEvidenceSummary } from '@/services/trip-evidence';
 import { tripService, type Trip, type TripLocation, type TripStop } from '@/services/trips';
+import { getApiErrorMessage } from '@/utils/api-error';
 import { resolveMediaUrl } from '@/utils/media-url';
 import { buildReturnTo, goBackSmart, pushWithReturnTo, useSmartBackHandler } from '@/utils/navigation';
 
@@ -677,6 +679,7 @@ export default function TripDetailsScreen() {
   const [loadedTripId, setLoadedTripId] = useState<string | null>(null);
   const [routeLoad, setRouteLoad] = useState<LoadDetail | null>(null);
   const [stops, setStops] = useState<TripStop[]>([]);
+  const [evidenceSummary, setEvidenceSummary] = useState<TripEvidenceSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [starting, setStarting] = useState(false);
@@ -869,16 +872,18 @@ export default function TripDetailsScreen() {
       const requestId = ++tripLoadRequestRef.current;
       try {
         if (!silent) setLoading(true);
-        const [tripData, stopsData, locationsData] = await Promise.all([
+        const [tripData, stopsData, locationsData, evidenceData] = await Promise.all([
           tripService.getTrip(id),
           tripService.getTripStops(id).catch(() => []),
           tripService.getTripLocations(id).catch(() => []),
+          tripEvidenceService.summary(id).catch(() => null),
         ]);
         if (requestId !== tripLoadRequestRef.current) return;
         setTrip(tripData);
         setLoadedTripId(id);
         setStops(stopsData);
         setLocationHistory(locationsData);
+        setEvidenceSummary(evidenceData);
         applyTripSnapshot(tripData);
       } catch (error) {
         if (requestId !== tripLoadRequestRef.current) return;
@@ -905,6 +910,7 @@ export default function TripDetailsScreen() {
     setLoadedTripId(null);
     setRouteLoad(null);
     setStops([]);
+    setEvidenceSummary(null);
     setLocationHistory([]);
     setRoutePath([]);
     setRouteOptions([]);
@@ -928,6 +934,9 @@ export default function TripDetailsScreen() {
         'trip.stop_started',
         'trip.stop_completed',
         'trip.delay_fee_started',
+        'trip.evidence_uploaded',
+        'trip.pickup_evidence_finalized',
+        'trip.delivery_evidence_finalized',
       ],
       (event) => {
         if (
@@ -937,10 +946,11 @@ export default function TripDetailsScreen() {
           return;
         }
 
-        void tripService
-          .getTripStops(numericTripId)
-          .then(setStops)
-          .catch(() => undefined);
+        if (String(event.type).includes('evidence')) {
+          void tripEvidenceService.summary(numericTripId).then(setEvidenceSummary).catch(() => undefined);
+        } else {
+          void tripService.getTripStops(numericTripId).then(setStops).catch(() => undefined);
+        }
       },
     );
   }, [numericTripId, addListenerForTypes]);
@@ -1277,7 +1287,7 @@ export default function TripDetailsScreen() {
       showDialog('Indo Carregar', 'Iniciou o deslocamento para o local de carregamento. O mapa irá guiá-lo à Origem.', 'success');
     } catch (error) {
       console.error('Failed to start pickup trip:', error);
-      showDialog('Erro', 'Não foi possível iniciar o deslocamento para coleta.', 'error');
+      showDialog('Erro', getApiErrorMessage(error, 'Não foi possível iniciar o deslocamento para recolha.'), 'error');
     } finally {
       setStarting(false);
     }
@@ -1294,7 +1304,7 @@ export default function TripDetailsScreen() {
       showDialog('Chegou à Origem', 'Confirmou a chegada ao local de carregamento.', 'success');
     } catch (error) {
       console.error('Failed to confirm pickup arrival:', error);
-      showDialog('Erro', 'Não foi possível confirmar a chegada ao carregamento.', 'error');
+      showDialog('Erro', getApiErrorMessage(error, 'Não foi possível confirmar a chegada ao carregamento.'), 'error');
     } finally {
       setStarting(false);
     }
@@ -1302,6 +1312,14 @@ export default function TripDetailsScreen() {
 
   const handleConfirmLoaded = async () => {
     if (!id) return;
+    if (!evidenceSummary?.pickup.finalized) {
+      pushWithReturnTo(
+        '/trip_evidence',
+        { id, stage: 'pickup' },
+        buildReturnTo('/trip_details', { id, returnTo }),
+      );
+      return;
+    }
     try {
       setStarting(true);
       const updated = await tripService.confirmLoadedTrip(id);
@@ -1311,7 +1329,7 @@ export default function TripDetailsScreen() {
       showDialog('Carga Carregada', 'Confirmou o carregamento da carga no camião. Pode iniciar a viagem de entrega!', 'success');
     } catch (error) {
       console.error('Failed to confirm loaded:', error);
-      showDialog('Erro', 'Não foi possível confirmar o carregamento.', 'error');
+      showDialog('Erro', getApiErrorMessage(error, 'Não foi possível confirmar o carregamento.'), 'error');
     } finally {
       setStarting(false);
     }
@@ -1351,7 +1369,7 @@ export default function TripDetailsScreen() {
       );
     } catch (error) {
       console.error('Failed to start trip:', error);
-      showDialog('Erro', 'Não foi possível iniciar a viagem de entrega.', 'error');
+      showDialog('Erro', getApiErrorMessage(error, 'Não foi possível iniciar a viagem de entrega.'), 'error');
     } finally {
       setStarting(false);
     }
@@ -2105,8 +2123,16 @@ export default function TripDetailsScreen() {
                   <ActivityIndicator color="#101217" />
                 ) : (
                   <>
-                    <Ionicons name="cube" size={18} color="#101217" />
-                    <Text style={styles.primaryBtnText}>Confirmar Carregamento</Text>
+                    <Ionicons
+                      name={evidenceSummary?.pickup.finalized ? 'cube' : 'camera'}
+                      size={18}
+                      color="#101217"
+                    />
+                    <Text style={styles.primaryBtnText}>
+                      {evidenceSummary?.pickup.finalized
+                        ? 'Confirmar Carregamento'
+                        : `Provas da Recolha (${evidenceSummary?.pickup.photo_count ?? 0}/3)`}
+                    </Text>
                   </>
                 )}
               </Pressable>
