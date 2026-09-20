@@ -103,7 +103,7 @@ function QuickActions() {
         <Pressable
           key={item.label}
           style={styles.quickCard}
-          onPress={item.route ? () => router.push(item.route) : undefined}
+          onPress={item.route ? () => router.push(item.route!) : undefined}
           accessibilityRole="button">
           <Ionicons name={item.icon} size={24} color={item.color} />
           <Text style={styles.quickLabel} numberOfLines={1} ellipsizeMode="tail">
