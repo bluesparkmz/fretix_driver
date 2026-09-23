@@ -1748,7 +1748,10 @@ export default function TripDetailsScreen() {
               flat
               rotation={truckMarkerRotation}
               zIndex={20}
-              tracksViewChanges={false}>
+              // No Android, desligar isto antes de a imagem carregar pode
+              // capturar um marcador vazio. Há apenas um camião no mapa, por
+              // isso mantemos o rastreio visual ativo para garantir a imagem.
+              tracksViewChanges>
               <View style={styles.truckMarkerWrap} collapsable={false}>
                 <Image
                   source={require('../../assets/truck_marker.png')}
