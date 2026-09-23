@@ -1,4 +1,4 @@
-import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
@@ -1744,19 +1744,13 @@ export default function TripDetailsScreen() {
                   ? `Matrícula ${currentTrip.vehicle.plate}`
                   : 'Localização actual do motorista'
               }
+              image={require('../../assets/truck_marker_map.png')}
               anchor={{ x: 0.5, y: 0.5 }}
               flat
-              // O ícone vectorial aponta para a direita; -90º alinha a cabine ao Norte.
-              rotation={(truckMarkerRotation + 270) % 360}
+              rotation={truckMarkerRotation}
               zIndex={20}
-              // No Android, desligar isto antes de a imagem carregar pode
-              // capturar um marcador vazio. Há apenas um camião no mapa, por
-              // isso mantemos o rastreio visual ativo para garantir a imagem.
-              tracksViewChanges>
-              <View style={styles.truckMarkerWrap} collapsable={false}>
-                <MaterialCommunityIcons name="truck" size={22} color="#0B0F14" />
-              </View>
-            </Marker.Animated>
+              tracksViewChanges={false}
+            />
           ) : null}
         </MapView>
 
@@ -2464,21 +2458,6 @@ const styles = StyleSheet.create({
   navigationDistance: { color: FretixColors.yellow, fontSize: 13, fontWeight: '900', marginBottom: 3 },
   navigationInstruction: { color: FretixColors.white, fontSize: 16, fontWeight: '800', lineHeight: 20 },
   navigationRoad: { color: '#AAB2BE', fontSize: 12, fontWeight: '700', marginTop: 3 },
-  truckMarkerWrap: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: FretixColors.yellow,
-    borderWidth: 2,
-    borderColor: '#0B0F14',
-    shadowColor: '#000000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.32,
-    shadowRadius: 3,
-    elevation: 8,
-  },
   destinationPlaceLabel: {
     maxWidth: 145,
     flexDirection: 'row',
