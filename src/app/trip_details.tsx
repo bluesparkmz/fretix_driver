@@ -1,4 +1,4 @@
-import { Ionicons } from '@expo/vector-icons';
+import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useLocalSearchParams } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
@@ -1746,18 +1746,15 @@ export default function TripDetailsScreen() {
               }
               anchor={{ x: 0.5, y: 0.5 }}
               flat
-              rotation={truckMarkerRotation}
+              // O ícone vectorial aponta para a direita; -90º alinha a cabine ao Norte.
+              rotation={(truckMarkerRotation + 270) % 360}
               zIndex={20}
               // No Android, desligar isto antes de a imagem carregar pode
               // capturar um marcador vazio. Há apenas um camião no mapa, por
               // isso mantemos o rastreio visual ativo para garantir a imagem.
               tracksViewChanges>
               <View style={styles.truckMarkerWrap} collapsable={false}>
-                <Image
-                  source={require('../../assets/truck_marker.png')}
-                  style={styles.truckMarkerImage}
-                  resizeMode="contain"
-                />
+                <MaterialCommunityIcons name="truck" size={22} color="#0B0F14" />
               </View>
             </Marker.Animated>
           ) : null}
@@ -2468,19 +2465,19 @@ const styles = StyleSheet.create({
   navigationInstruction: { color: FretixColors.white, fontSize: 16, fontWeight: '800', lineHeight: 20 },
   navigationRoad: { color: '#AAB2BE', fontSize: 12, fontWeight: '700', marginTop: 3 },
   truckMarkerWrap: {
-    width: 26,
-    height: 44,
+    width: 34,
+    height: 34,
+    borderRadius: 17,
     alignItems: 'center',
     justifyContent: 'center',
+    backgroundColor: FretixColors.yellow,
+    borderWidth: 2,
+    borderColor: '#0B0F14',
     shadowColor: '#000000',
     shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.28,
+    shadowOpacity: 0.32,
     shadowRadius: 3,
-    elevation: 6,
-  },
-  truckMarkerImage: {
-    width: 22,
-    height: 42,
+    elevation: 8,
   },
   destinationPlaceLabel: {
     maxWidth: 145,
