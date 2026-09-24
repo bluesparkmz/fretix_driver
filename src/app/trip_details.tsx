@@ -15,7 +15,7 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import MapView, { AnimatedRegion, Marker, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
+import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
 
 import { CustomDialog } from '@/components/custom-dialog';
 import { LoadTypeImage } from '@/components/load-type-image';
@@ -83,6 +83,9 @@ const ROUTE_SNAP_THRESHOLD_KM = 0.045;
 const ROUTE_DEVIATION_THRESHOLD_KM = 0.065;
 const REROUTE_MIN_INTERVAL_MS = 6_000;
 const OFF_ROUTE_SAMPLES_REQUIRED = 2;
+const ROUTE_RECOVERY_SAMPLES_REQUIRED = 2;
+const ROUTE_RECOVERY_MIN_MOVEMENT_KM = 0.015;
+const OFF_ROUTE_REMINDER_INTERVAL_MS = 10_000;
 const NAVIGATION_CAMERA_ZOOM = 17;
 const NAVIGATION_CAMERA_PITCH = 67;
 const GUIDANCE_HIGHLIGHT_DISTANCE_KM = 0.3;
@@ -563,18 +566,31 @@ const extractRoadNameFromInstruction = (instruction?: string | null) => {
 
 const getNextNavigationStep = (current: Coordinate, steps: GoogleRouteStep[]) => {
   if (steps.length === 0) return null;
-  const distances = steps.map((step) => getDistanceKm(current, step.endLocation));
-  const closestIndex = distances.reduce(
-    (best, distance, index) => distance < distances[best] ? index : best,
+
+  // Encontra o troço onde o motorista está, em vez de escolher apenas o
+  // ponto final mais próximo. Pontos finais próximos em ruas paralelas ou em
+  // cruzamentos faziam o app recuperar uma manobra já ultrapassada.
+  const segmentDistances = steps.map((step) =>
+    getClosestPointOnRoute(
+      current,
+      step.coordinates.length > 1
+        ? step.coordinates
+        : [step.startLocation, step.endLocation],
+    ).distanceKm,
+  );
+  const currentStepIndex = segmentDistances.reduce(
+    (best, distance, index) => distance < segmentDistances[best] ? index : best,
     0,
   );
-  const stepIndex = distances[closestIndex] <= 0.025
-    ? Math.min(closestIndex + 1, steps.length - 1)
-    : closestIndex;
-  const nextStep = steps[stepIndex];
+
+  // A manobra de um passo acontece no início dele. Enquanto percorremos o
+  // passo actual, a orientação útil é a manobra do passo seguinte, a ocorrer
+  // no fim do troço actual.
+  const guidanceStepIndex = Math.min(currentStepIndex + 1, steps.length - 1);
+  const nextStep = steps[guidanceStepIndex];
   return {
     ...nextStep,
-    distanceKm: getDistanceKm(current, nextStep.endLocation),
+    distanceKm: getDistanceKm(current, steps[currentStepIndex].endLocation),
   };
 };
 
@@ -784,22 +800,19 @@ export default function TripDetailsScreen() {
   const lastHeight = useRef(COLLAPSED_HEIGHT);
   const mapRef = useRef<MapView | null>(null);
 
-  // Marcador animado: a posição desliza entre actualizações GPS em vez de saltar.
-  const driverAnimatedCoordinate = useRef(
-    new AnimatedRegion({
-      latitude: DEFAULT_MAP_CENTER.latitude,
-      longitude: DEFAULT_MAP_CENTER.longitude,
-      latitudeDelta: 0,
-      longitudeDelta: 0,
-    }),
-  ).current;
   const previousDriverCoordinateRef = useRef<Coordinate | null>(null);
   const arrivalPromptShownRef = useRef(false);
   const [driverBearing, setDriverBearing] = useState(0);
+  const [isRecoveringRoute, setIsRecoveringRoute] = useState(false);
+  const [routeRecoveredVisible, setRouteRecoveredVisible] = useState(false);
+  const [offRouteReminderTick, setOffRouteReminderTick] = useState(0);
 
   const lastRerouteRef = useRef<{ coordinate: Coordinate; timestamp: number } | null>(null);
   const rerouteInFlightRef = useRef(false);
   const offRouteSamplesRef = useRef(0);
+  const recoveryOnRouteSamplesRef = useRef(0);
+  const recoveryRouteOriginRef = useRef<Coordinate | null>(null);
+  const routeRecoveredTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const tripLoadRequestRef = useRef(0);
   const tripLoadInFlightRef = useRef(false);
   const lastAutomaticLoadIdRef = useRef<string | null>(null);
@@ -899,8 +912,8 @@ export default function TripDetailsScreen() {
       ? routeProjection!.coordinate
       : navigationLocation;
 
-  // Suaviza o movimento do camião e usa a direcção da estrada quando o
-  // veículo está encaixado na rota. Fora da rota usa o bearing do GPS.
+  // Usa a direcção da estrada quando o veículo está encaixado na rota. Fora
+  // dela, calcula a direcção pelo deslocamento real do GPS.
   useEffect(() => {
     if (!displayNavigationLocation) return;
 
@@ -923,18 +936,8 @@ export default function TripDetailsScreen() {
       }
     }
 
-    (driverAnimatedCoordinate as any)
-      .timing({
-        latitude: displayNavigationLocation.latitude,
-        longitude: displayNavigationLocation.longitude,
-        duration: 900,
-        useNativeDriver: false,
-      })
-      .start();
-
     previousDriverCoordinateRef.current = displayNavigationLocation;
   }, [
-    driverAnimatedCoordinate,
     displayNavigationLocation?.latitude,
     displayNavigationLocation?.longitude,
     isSnappedToRoute,
@@ -1000,6 +1003,15 @@ export default function TripDetailsScreen() {
     lastRerouteRef.current = null;
     rerouteInFlightRef.current = false;
     offRouteSamplesRef.current = 0;
+    recoveryOnRouteSamplesRef.current = 0;
+    recoveryRouteOriginRef.current = null;
+    setIsRecoveringRoute(false);
+    setRouteRecoveredVisible(false);
+    setOffRouteReminderTick(0);
+    if (routeRecoveredTimeoutRef.current) {
+      clearTimeout(routeRecoveredTimeoutRef.current);
+      routeRecoveredTimeoutRef.current = null;
+    }
     setTrip(null);
     setLoadError(null);
     setLoadedTripId(null);
@@ -1018,6 +1030,25 @@ export default function TripDetailsScreen() {
     setIsMapReady(false);
     setLoading(true);
   }, [id]);
+
+  useEffect(() => {
+    if (!isRecoveringRoute) return;
+
+    // O aviso permanece no cartão e é renovado de 10 em 10 segundos para que
+    // o motorista não continue fora da rota sem uma indicação clara.
+    const interval = setInterval(
+      () => setOffRouteReminderTick((current) => current + 1),
+      OFF_ROUTE_REMINDER_INTERVAL_MS,
+    );
+
+    return () => clearInterval(interval);
+  }, [isRecoveringRoute]);
+
+  useEffect(() => () => {
+    if (routeRecoveredTimeoutRef.current) {
+      clearTimeout(routeRecoveredTimeoutRef.current);
+    }
+  }, []);
 
   useEffect(() => {
     if (!id || lastAutomaticLoadIdRef.current === id) return;
@@ -1210,8 +1241,39 @@ export default function TripDetailsScreen() {
     if (activeRoute.length > 1) {
       if (distanceFromRouteKm >= ROUTE_DEVIATION_THRESHOLD_KM) {
         offRouteSamplesRef.current += 1;
+        recoveryOnRouteSamplesRef.current = 0;
       } else {
         offRouteSamplesRef.current = 0;
+
+        if (isRecoveringRoute) {
+          const recoveryOrigin = recoveryRouteOriginRef.current;
+          const movedSinceRerouteKm = recoveryOrigin
+            ? getDistanceKm(recoveryOrigin, navigationLocation)
+            : ROUTE_RECOVERY_MIN_MOVEMENT_KM;
+
+          if (
+            distanceFromRouteKm <= ROUTE_SNAP_THRESHOLD_KM &&
+            movedSinceRerouteKm >= ROUTE_RECOVERY_MIN_MOVEMENT_KM
+          ) {
+            recoveryOnRouteSamplesRef.current += 1;
+          } else {
+            recoveryOnRouteSamplesRef.current = 0;
+          }
+
+          if (recoveryOnRouteSamplesRef.current >= ROUTE_RECOVERY_SAMPLES_REQUIRED) {
+            recoveryOnRouteSamplesRef.current = 0;
+            recoveryRouteOriginRef.current = null;
+            setIsRecoveringRoute(false);
+            setRouteRecoveredVisible(true);
+            if (routeRecoveredTimeoutRef.current) {
+              clearTimeout(routeRecoveredTimeoutRef.current);
+            }
+            routeRecoveredTimeoutRef.current = setTimeout(
+              () => setRouteRecoveredVisible(false),
+              5_000,
+            );
+          }
+        }
         return;
       }
 
@@ -1220,6 +1282,9 @@ export default function TripDetailsScreen() {
       if (offRouteSamplesRef.current < OFF_ROUTE_SAMPLES_REQUIRED) {
         return;
       }
+
+      setIsRecoveringRoute(true);
+      setRouteRecoveredVisible(false);
     }
 
     if (last && now - last.timestamp < REROUTE_MIN_INTERVAL_MS) {
@@ -1268,6 +1333,8 @@ export default function TripDetailsScreen() {
           setRouteError(null);
           setRouteOptions(routes);
           setRoutePath(routes[0].coordinates);
+          recoveryRouteOriginRef.current = requestCoordinate;
+          recoveryOnRouteSamplesRef.current = 0;
         } else {
           setRouteError('Não foi encontrada uma nova rota por estrada.');
         }
@@ -1295,6 +1362,7 @@ export default function TripDetailsScreen() {
     navigationLocation?.longitude,
     routePath,
     routeLoad?.id,
+    isRecoveringRoute,
   ]);
 
   useEffect(() => {
@@ -1713,7 +1781,7 @@ export default function TripDetailsScreen() {
           {routeProgressSegments.remaining.length > 1 ? (
             <Polyline
               coordinates={routeProgressSegments.remaining}
-              strokeColor="#FFC107"
+              strokeColor={isRecoveringRoute ? '#EF4444' : '#FFC107'}
               strokeWidth={7}
               lineCap="round"
               lineJoin="round"
@@ -1736,8 +1804,8 @@ export default function TripDetailsScreen() {
           {originCoordinate ? <Marker coordinate={originCoordinate} title="Origem" description={origin} pinColor="#3B82F6" zIndex={5} /> : null}
           {destinationCoordinate ? <Marker coordinate={destinationCoordinate} title="Destino" description={destination} pinColor={FretixColors.yellow} zIndex={6} /> : null}
           {liveMarker ? (
-            <Marker.Animated
-              coordinate={driverAnimatedCoordinate as any}
+            <Marker
+              coordinate={liveMarker}
               title="Camião em movimento"
               description={
                 currentTrip.vehicle?.plate
@@ -1762,25 +1830,61 @@ export default function TripDetailsScreen() {
         ) : null}
 
         {isTripStarted ? (
-          <View style={styles.navigationCard} pointerEvents="none">
-            <View style={styles.navigationIcon}>
-              <Ionicons name={maneuverGuidance.icon} size={25} color="#0B0F14" />
+          <View
+            key={isRecoveringRoute ? `off-route-${offRouteReminderTick}` : 'on-route'}
+            style={[
+              styles.navigationCard,
+              isRecoveringRoute && styles.navigationCardOffRoute,
+              isRecoveringRoute && offRouteReminderTick % 2 === 1 && styles.navigationCardOffRoutePulse,
+              routeRecoveredVisible && styles.navigationCardRecovered,
+            ]}
+            pointerEvents="none">
+            <View style={[
+              styles.navigationIcon,
+              isRecoveringRoute && styles.navigationIconOffRoute,
+              routeRecoveredVisible && styles.navigationIconRecovered,
+            ]}>
+              <Ionicons
+                name={isRecoveringRoute
+                  ? 'warning'
+                  : routeRecoveredVisible
+                    ? 'checkmark'
+                    : maneuverGuidance.icon}
+                size={25}
+                color={isRecoveringRoute || routeRecoveredVisible ? '#FFFFFF' : '#0B0F14'}
+              />
             </View>
             <View style={styles.navigationTexts}>
-              <Text style={styles.navigationDistance}>
-                {currentStatus === 'viagem_iniciada' && isNearDestination && distanceToDestination != null
+              <Text style={[
+                styles.navigationDistance,
+                isRecoveringRoute && styles.navigationDistanceOffRoute,
+                routeRecoveredVisible && styles.navigationDistanceRecovered,
+              ]}>
+                {isRecoveringRoute
+                  ? 'FORA DA ROTA'
+                  : routeRecoveredVisible
+                    ? 'ROTA RECUPERADA'
+                    : currentStatus === 'viagem_iniciada' && isNearDestination && distanceToDestination != null
                   ? `Faltam ${formatNavigationDistance(distanceToDestination)} para chegar`
                   : nextStep
                     ? `Em ${formatNavigationDistance(nextStep.distanceKm)}`
                     : 'Continue pela rota'}
               </Text>
               <Text style={styles.navigationInstruction} numberOfLines={2}>
-                {currentStatus === 'viagem_iniciada' && isNearDestination
+                {isRecoveringRoute
+                  ? 'Está perdido. Siga a rota vermelha.'
+                  : routeRecoveredVisible
+                    ? 'Continue pela rota amarela.'
+                    : currentStatus === 'viagem_iniciada' && isNearDestination
                   ? `Continue até ${destination}`
                   : maneuverGuidance.instruction}
               </Text>
               <Text style={styles.navigationRoad} numberOfLines={1}>
-                {currentRoadName}
+                {isRecoveringRoute
+                  ? 'Regresse ao percurso indicado'
+                  : routeRecoveredVisible
+                    ? 'A navegação normal foi retomada'
+                    : currentRoadName}
               </Text>
             </View>
           </View>
@@ -2446,6 +2550,18 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 12,
   },
+  navigationCardOffRoute: {
+    borderColor: 'rgba(239,68,68,0.9)',
+    backgroundColor: 'rgba(35,8,10,0.95)',
+  },
+  navigationCardOffRoutePulse: {
+    borderColor: '#FCA5A5',
+    backgroundColor: 'rgba(55,10,13,0.97)',
+  },
+  navigationCardRecovered: {
+    borderColor: 'rgba(34,197,94,0.9)',
+    backgroundColor: 'rgba(6,30,18,0.95)',
+  },
   navigationIcon: {
     width: 48,
     height: 48,
@@ -2454,8 +2570,12 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  navigationIconOffRoute: { backgroundColor: '#EF4444' },
+  navigationIconRecovered: { backgroundColor: '#22C55E' },
   navigationTexts: { flex: 1 },
   navigationDistance: { color: FretixColors.yellow, fontSize: 13, fontWeight: '900', marginBottom: 3 },
+  navigationDistanceOffRoute: { color: '#FCA5A5' },
+  navigationDistanceRecovered: { color: '#86EFAC' },
   navigationInstruction: { color: FretixColors.white, fontSize: 16, fontWeight: '800', lineHeight: 20 },
   navigationRoad: { color: '#AAB2BE', fontSize: 12, fontWeight: '700', marginTop: 3 },
   destinationPlaceLabel: {

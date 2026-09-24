@@ -22,6 +22,7 @@ export type GoogleRouteStep = {
   maneuver?: string;
   startLocation: MapCoordinate;
   endLocation: MapCoordinate;
+  coordinates: MapCoordinate[];
 };
 
 export type MozambiquePlacePrediction = {
@@ -304,6 +305,13 @@ const mapRouteSteps = (leg: any): GoogleRouteStep[] =>
               latitude: end.lat,
               longitude: end.lng,
             },
+            coordinates:
+              typeof step.polyline?.points === 'string'
+                ? decodePolyline(step.polyline.points)
+                : [
+                    { latitude: start.lat, longitude: start.lng },
+                    { latitude: end.lat, longitude: end.lng },
+                  ],
           };
         })
         .filter(
