@@ -1,4 +1,4 @@
-import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
@@ -7,6 +7,7 @@ import {
   Dimensions,
   Image,
   PanResponder,
+  Platform,
   Pressable,
   RefreshControl,
   ScrollView,
@@ -1851,6 +1852,11 @@ export default function TripDetailsScreen() {
           {liveMarker ? (
             <Marker
               coordinate={liveMarker}
+              image={
+                Platform.OS === 'android'
+                  ? { uri: 'truck_marker_map' }
+                  : require('../../assets/truck_marker_map.png')
+              }
               title="Camião em movimento"
               description={
                 currentTrip.vehicle?.plate
@@ -1859,19 +1865,11 @@ export default function TripDetailsScreen() {
               }
               anchor={{ x: 0.5, y: 0.5 }}
               flat
-              // O camião vectorial aponta originalmente para a direita.
-              // -90º alinha a cabine ao Norte antes de aplicar o bearing.
-              rotation={(truckMarkerRotation + 270) % 360}
+              // O PNG aponta com a cabine para o Norte (0 graus).
+              rotation={truckMarkerRotation}
               zIndex={20}
-              tracksViewChanges>
-              <View style={styles.liveTruckMarker} collapsable={false}>
-                <MaterialCommunityIcons
-                  name="truck-cargo-container"
-                  size={27}
-                  color="#FFFFFF"
-                />
-              </View>
-            </Marker>
+              tracksViewChanges={false}
+            />
           ) : null}
         </MapView>
 
@@ -2631,21 +2629,6 @@ const styles = StyleSheet.create({
   navigationDistanceRecovered: { color: '#86EFAC' },
   navigationInstruction: { color: FretixColors.white, fontSize: 16, fontWeight: '800', lineHeight: 20 },
   navigationRoad: { color: '#AAB2BE', fontSize: 12, fontWeight: '700', marginTop: 3 },
-  liveTruckMarker: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#111827',
-    borderWidth: 2,
-    borderColor: FretixColors.yellow,
-    shadowColor: '#000000',
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.42,
-    shadowRadius: 4,
-    elevation: 12,
-  },
   destinationPlaceLabel: {
     maxWidth: 145,
     flexDirection: 'row',
