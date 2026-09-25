@@ -21,6 +21,8 @@ type LocationPayload = {
   latitude: number;
   longitude: number;
   speed?: number;
+  heading?: number;
+  accuracy?: number;
 };
 
 const HTTP_SEND_INTERVAL_MS = 10_000;
@@ -41,6 +43,13 @@ function toSpeedKmH(speedMetersPerSecond: number | null | undefined) {
   }
 
   return Math.round(speedMetersPerSecond * 3.6);
+}
+
+function toHeading(value: number | null | undefined) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    return undefined;
+  }
+  return ((value % 360) + 360) % 360;
 }
 
 function coordinatesChanged(a: LocationPayload, b: LocationPayload) {
@@ -203,6 +212,8 @@ export function useDriverTripLocationSharing({
               latitude,
               longitude,
               speed: toSpeedKmH(position.coords.speed),
+              heading: toHeading(position.coords.heading),
+              accuracy: toNullableNumber(position.coords.accuracy),
             };
 
             latestPositionRef.current = payload;

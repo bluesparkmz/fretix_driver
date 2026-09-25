@@ -16,7 +16,7 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
+import MapView, { Marker, Polyline, PROVIDER_GOOGLE, type MapMarker } from 'react-native-maps';
 
 import { CustomDialog } from '@/components/custom-dialog';
 import { LoadTypeImage } from '@/components/load-type-image';
@@ -90,6 +90,10 @@ const OFF_ROUTE_REMINDER_INTERVAL_MS = 10_000;
 const NAVIGATION_CAMERA_ZOOM = 18.5;
 const NAVIGATION_CAMERA_PITCH = 67;
 const NAVIGATION_LOOK_AHEAD_KM = 0.12;
+const TRUCK_HEADING_LOOK_AHEAD_KM = 0.035;
+const MIN_HEADING_MOVEMENT_KM = 0.004;
+const HEADING_SMOOTHING_FACTOR = 0.55;
+const MARKER_ANIMATION_DURATION_MS = 850;
 const GUIDANCE_HIGHLIGHT_DISTANCE_KM = 0.3;
 const NEAR_DESTINATION_DISTANCE_KM = 0.5;
 const ARRIVAL_MODAL_DISTANCE_KM = 0.05;
@@ -319,7 +323,11 @@ const getDistanceKm = (a: Coordinate, b: Coordinate) => {
  * Isto funciona como "map matching" visual: enquanto o GPS estiver perto
  * da estrada calculada, o camião aparece exactamente sobre a polyline.
  */
-const getClosestPointOnRoute = (point: Coordinate, route: Coordinate[]) => {
+const getClosestPointOnRoute = (
+  point: Coordinate,
+  route: Coordinate[],
+  segmentRange?: { start: number; end: number },
+) => {
   if (route.length === 0) {
     return {
       coordinate: point,
@@ -354,7 +362,16 @@ const getClosestPointOnRoute = (point: Coordinate, route: Coordinate[]) => {
   let bestCoordinate = point;
   let bestSegmentIndex = 0;
 
-  for (let index = 0; index < route.length - 1; index += 1) {
+  const firstSegment = Math.max(
+    0,
+    Math.min(segmentRange?.start ?? 0, route.length - 2),
+  );
+  const lastSegment = Math.max(
+    firstSegment,
+    Math.min(segmentRange?.end ?? route.length - 2, route.length - 2),
+  );
+
+  for (let index = firstSegment; index <= lastSegment; index += 1) {
     const a = toLocalMeters(route[index]);
     const b = toLocalMeters(route[index + 1]);
 
@@ -449,6 +466,11 @@ const getBearing = (from: Coordinate, to: Coordinate) => {
   return (((Math.atan2(y, x) * 180) / Math.PI) + 360) % 360;
 };
 
+const interpolateBearing = (current: number, target: number, factor: number) => {
+  const shortestTurn = ((target - current + 540) % 360) - 180;
+  return (current + shortestTurn * factor + 360) % 360;
+};
+
 const getNearestRouteIndex = (coordinate: Coordinate, route: Coordinate[]) => {
   if (route.length === 0) return 0;
   return route.reduce(
@@ -460,14 +482,13 @@ const getNearestRouteIndex = (coordinate: Coordinate, route: Coordinate[]) => {
   ).index;
 };
 
-const getRoutePointAhead = (
-  current: Coordinate,
+const getRoutePointAheadFromProjection = (
+  projection: ReturnType<typeof getClosestPointOnRoute>,
   route: Coordinate[],
   lookAheadKm: number,
 ) => {
   if (route.length < 2) return null;
 
-  const projection = getClosestPointOnRoute(current, route);
   let previous = projection.coordinate;
   let accumulatedKm = 0;
 
@@ -544,6 +565,7 @@ const splitRouteAtCurrentPosition = (
   current: Coordinate,
   route: Coordinate[],
   active: boolean,
+  matchedProjection?: ReturnType<typeof getClosestPointOnRoute> | null,
 ) => {
   if (!active || route.length < 2) {
     return {
@@ -552,7 +574,7 @@ const splitRouteAtCurrentPosition = (
     };
   }
 
-  const projection = getClosestPointOnRoute(current, route);
+  const projection = matchedProjection ?? getClosestPointOnRoute(current, route);
   const splitIndex = Math.min(
     Math.max(projection.segmentIndex, 0),
     route.length - 2,
@@ -835,10 +857,18 @@ export default function TripDetailsScreen() {
   const sheetHeight = useRef(new Animated.Value(COLLAPSED_HEIGHT)).current;
   const lastHeight = useRef(COLLAPSED_HEIGHT);
   const mapRef = useRef<MapView | null>(null);
+  const truckMarkerRef = useRef<MapMarker | null>(null);
 
   const previousDriverCoordinateRef = useRef<Coordinate | null>(null);
+  const hasDriverBearingRef = useRef(false);
+  const matchedRouteSegmentRef = useRef<{
+    route: Coordinate[];
+    segmentIndex: number;
+  } | null>(null);
+  const markerAnimationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const arrivalPromptShownRef = useRef(false);
   const [driverBearing, setDriverBearing] = useState(0);
+  const [animatedTruckCoordinate, setAnimatedTruckCoordinate] = useState<Coordinate | null>(null);
   const [isRecoveringRoute, setIsRecoveringRoute] = useState(false);
   const [routeRecoveredVisible, setRouteRecoveredVisible] = useState(false);
   const [offRouteReminderTick, setOffRouteReminderTick] = useState(0);
@@ -934,9 +964,31 @@ export default function TripDetailsScreen() {
       ? routePath
       : routeOptions[0]?.coordinates ?? [];
 
+  const previousRouteMatch =
+    matchedRouteSegmentRef.current?.route === effectiveRouteForSnap
+      ? matchedRouteSegmentRef.current
+      : null;
+
+  // Depois do primeiro encaixe, procura apenas perto do último segmento e
+  // sobretudo à frente. Isto evita saltos para ruas paralelas, cruzamentos ou
+  // partes já percorridas da mesma rota.
+  const projectionSearchRange = previousRouteMatch
+    ? {
+        start: Math.max(previousRouteMatch.segmentIndex - 2, 0),
+        end: Math.min(
+          previousRouteMatch.segmentIndex + 120,
+          effectiveRouteForSnap.length - 2,
+        ),
+      }
+    : undefined;
+
   const routeProjection =
     navigationLocation && effectiveRouteForSnap.length > 1
-      ? getClosestPointOnRoute(navigationLocation, effectiveRouteForSnap)
+      ? getClosestPointOnRoute(
+          navigationLocation,
+          effectiveRouteForSnap,
+          projectionSearchRange,
+        )
       : null;
 
   const isSnappedToRoute =
@@ -948,38 +1000,128 @@ export default function TripDetailsScreen() {
       ? routeProjection!.coordinate
       : navigationLocation;
 
-  // Usa a direcção da estrada quando o veículo está encaixado na rota. Fora
-  // dela, calcula a direcção pelo deslocamento real do GPS.
+  const routeHeadingPoint =
+    isSnappedToRoute && routeProjection
+      ? getRoutePointAheadFromProjection(
+          routeProjection,
+          effectiveRouteForSnap,
+          TRUCK_HEADING_LOOK_AHEAD_KM,
+        )
+      : null;
+
+  // Usa uma tangente de 35 m à frente quando o camião está na rota. Isso
+  // absorve micro-segmentos da polyline e prepara a rotação antes das curvas.
+  // Fora da rota, mantém a direcção calculada pelo deslocamento real do GPS.
   useEffect(() => {
-    if (!displayNavigationLocation) return;
+    if (!navigationLocation || !displayNavigationLocation) return;
+
+    let targetBearing: number | null = null;
 
     if (
       isSnappedToRoute &&
       routeProjection &&
-      effectiveRouteForSnap[routeProjection.segmentIndex + 1]
+      routeHeadingPoint
     ) {
-      setDriverBearing(
-        getBearing(
-          effectiveRouteForSnap[routeProjection.segmentIndex],
-          effectiveRouteForSnap[routeProjection.segmentIndex + 1],
-        ),
-      );
+      const previousMatch = matchedRouteSegmentRef.current;
+      matchedRouteSegmentRef.current = {
+        route: effectiveRouteForSnap,
+        segmentIndex:
+          previousMatch?.route === effectiveRouteForSnap
+            ? Math.max(previousMatch.segmentIndex, routeProjection.segmentIndex)
+            : routeProjection.segmentIndex,
+      };
+      targetBearing = getBearing(routeProjection.coordinate, routeHeadingPoint);
     } else {
       const previous = previousDriverCoordinateRef.current;
+      const deviceHeading = driverDeviceLocation?.heading;
 
-      if (previous && !coordinatesMatch(previous, displayNavigationLocation)) {
-        setDriverBearing(getBearing(previous, displayNavigationLocation));
+      if (
+        typeof deviceHeading === 'number' &&
+        Number.isFinite(deviceHeading) &&
+        deviceHeading >= 0 &&
+        (driverDeviceLocation?.speed ?? 0) >= 5
+      ) {
+        targetBearing = deviceHeading;
+      }
+
+      if (
+        targetBearing == null &&
+        previous &&
+        getDistanceKm(previous, navigationLocation) >= MIN_HEADING_MOVEMENT_KM
+      ) {
+        targetBearing = getBearing(previous, navigationLocation);
       }
     }
 
-    previousDriverCoordinateRef.current = displayNavigationLocation;
+    if (targetBearing != null) {
+      setDriverBearing((currentBearing) => {
+        if (!hasDriverBearingRef.current) {
+          hasDriverBearingRef.current = true;
+          return targetBearing!;
+        }
+        return interpolateBearing(
+          currentBearing,
+          targetBearing!,
+          HEADING_SMOOTHING_FACTOR,
+        );
+      });
+    }
+
+    previousDriverCoordinateRef.current = navigationLocation;
   }, [
+    navigationLocation?.latitude,
+    navigationLocation?.longitude,
     displayNavigationLocation?.latitude,
     displayNavigationLocation?.longitude,
     isSnappedToRoute,
     routeProjection?.segmentIndex,
+    routeHeadingPoint?.latitude,
+    routeHeadingPoint?.longitude,
     routePath,
   ]);
+
+  useEffect(() => {
+    if (!displayNavigationLocation) {
+      setAnimatedTruckCoordinate(null);
+      return;
+    }
+
+    if (!animatedTruckCoordinate) {
+      setAnimatedTruckCoordinate(displayNavigationLocation);
+      return;
+    }
+
+    if (coordinatesMatch(animatedTruckCoordinate, displayNavigationLocation)) return;
+
+    truckMarkerRef.current?.animateMarkerToCoordinate(
+      displayNavigationLocation,
+      MARKER_ANIMATION_DURATION_MS,
+    );
+
+    if (markerAnimationTimeoutRef.current) {
+      clearTimeout(markerAnimationTimeoutRef.current);
+    }
+    markerAnimationTimeoutRef.current = setTimeout(() => {
+      setAnimatedTruckCoordinate(displayNavigationLocation);
+      markerAnimationTimeoutRef.current = null;
+    }, MARKER_ANIMATION_DURATION_MS);
+  }, [
+    displayNavigationLocation?.latitude,
+    displayNavigationLocation?.longitude,
+  ]);
+
+  useEffect(() => {
+    matchedRouteSegmentRef.current = null;
+    previousDriverCoordinateRef.current = null;
+    hasDriverBearingRef.current = false;
+    setAnimatedTruckCoordinate(null);
+  }, [currentTrip?.id]);
+
+  useEffect(() => () => {
+    if (markerAnimationTimeoutRef.current) {
+      clearTimeout(markerAnimationTimeoutRef.current);
+    }
+  }, []);
 
   const showDialog = useCallback((title: string, message: string, type: 'success' | 'error' | 'info' = 'info') => {
     setDialogProps({ title, message, type });
@@ -1204,18 +1346,22 @@ export default function TripDetailsScreen() {
     // 3D is the close navigation view. In 2D keep the complete route visible,
     // including the destination marker, just like CargoLink's route preview.
     if (isTripStarted && is3DMode && currentCoordinate) {
-      const nextRoutePoint = getRoutePointAhead(
-        currentCoordinate,
-        routePath,
-        NAVIGATION_LOOK_AHEAD_KM,
-      );
+      const nextRoutePoint =
+        isSnappedToRoute && routeProjection
+          ? getRoutePointAheadFromProjection(
+              routeProjection,
+              effectiveRouteForSnap,
+              NAVIGATION_LOOK_AHEAD_KM,
+            )
+          : null;
       mapRef.current?.animateCamera(
         {
           // Centrar à frente coloca o camião na zona inferior do mapa e
           // mostra ao motorista mais estrada útil, como no Google Maps.
           center: nextRoutePoint ?? currentCoordinate,
           pitch: is3DMode ? NAVIGATION_CAMERA_PITCH : 0,
-          heading: nextRoutePoint ? getBearing(currentCoordinate, nextRoutePoint) : 0,
+          // Câmara e camião usam o mesmo bearing suavizado.
+          heading: driverBearing,
           zoom: NAVIGATION_CAMERA_ZOOM,
         },
         { duration: 850 },
@@ -1240,6 +1386,9 @@ export default function TripDetailsScreen() {
     isTripStarted,
     displayNavigationLocation?.latitude,
     displayNavigationLocation?.longitude,
+    driverBearing,
+    isSnappedToRoute,
+    routeProjection?.segmentIndex,
     locationHistory,
     routePath,
     currentTrip?.id,
@@ -1277,7 +1426,9 @@ export default function TripDetailsScreen() {
 
     const distanceFromRouteKm =
       activeRoute.length > 1
-        ? getDistanceToRouteKm(navigationLocation, activeRoute)
+        ? activeRoute === effectiveRouteForSnap && routeProjection
+          ? routeProjection.distanceKm
+          : getDistanceToRouteKm(navigationLocation, activeRoute)
         : Number.POSITIVE_INFINITY;
 
     if (activeRoute.length > 1) {
@@ -1672,6 +1823,7 @@ export default function TripDetailsScreen() {
   const hasDrivingRoute = routeCoordinates.length > 1;
   const historyCoordinates = normalizeTripLocations(locationHistory);
   const liveMarker = isTripStarted ? displayNavigationLocation : null;
+  const truckMapCoordinate = animatedTruckCoordinate ?? liveMarker;
   const traveledRouteCoordinates = buildTraveledRouteCoordinates(historyCoordinates, liveMarker);
   const currentCoordinate =
     displayNavigationLocation ??
@@ -1711,6 +1863,7 @@ export default function TripDetailsScreen() {
     currentCoordinate,
     routeCoordinates,
     shouldShowTraveledRoute,
+    routeCoordinates === effectiveRouteForSnap ? routeProjection : null,
   );
   const nextStep = getNextNavigationStep(
     currentCoordinate,
@@ -1850,9 +2003,10 @@ export default function TripDetailsScreen() {
           ) : null}
           {originCoordinate ? <Marker coordinate={originCoordinate} title="Origem" description={origin} pinColor="#3B82F6" zIndex={5} /> : null}
           {destinationCoordinate ? <Marker coordinate={destinationCoordinate} title="Destino" description={destination} pinColor={FretixColors.yellow} zIndex={6} /> : null}
-          {liveMarker ? (
+          {truckMapCoordinate ? (
             <Marker
-              coordinate={liveMarker}
+              ref={truckMarkerRef}
+              coordinate={truckMapCoordinate}
               image={
                 Platform.OS === 'android'
                   ? { uri: 'truck_marker_map' }
