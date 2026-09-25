@@ -1,4 +1,4 @@
-import { Ionicons } from '@expo/vector-icons';
+import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useLocalSearchParams } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
@@ -86,8 +86,9 @@ const OFF_ROUTE_SAMPLES_REQUIRED = 2;
 const ROUTE_RECOVERY_SAMPLES_REQUIRED = 2;
 const ROUTE_RECOVERY_MIN_MOVEMENT_KM = 0.015;
 const OFF_ROUTE_REMINDER_INTERVAL_MS = 10_000;
-const NAVIGATION_CAMERA_ZOOM = 17;
+const NAVIGATION_CAMERA_ZOOM = 18.2;
 const NAVIGATION_CAMERA_PITCH = 67;
+const NAVIGATION_LOOK_AHEAD_KM = 0.12;
 const GUIDANCE_HIGHLIGHT_DISTANCE_KM = 0.3;
 const NEAR_DESTINATION_DISTANCE_KM = 0.5;
 const ARRIVAL_MODAL_DISTANCE_KM = 0.05;
@@ -456,6 +457,40 @@ const getNearestRouteIndex = (coordinate: Coordinate, route: Coordinate[]) => {
     },
     { index: 0, distance: Number.POSITIVE_INFINITY },
   ).index;
+};
+
+const getRoutePointAhead = (
+  current: Coordinate,
+  route: Coordinate[],
+  lookAheadKm: number,
+) => {
+  if (route.length < 2) return null;
+
+  const projection = getClosestPointOnRoute(current, route);
+  let previous = projection.coordinate;
+  let accumulatedKm = 0;
+
+  for (
+    let index = Math.min(projection.segmentIndex + 1, route.length - 1);
+    index < route.length;
+    index += 1
+  ) {
+    const next = route[index];
+    const segmentKm = getDistanceKm(previous, next);
+
+    if (accumulatedKm + segmentKm >= lookAheadKm && segmentKm > 0) {
+      const ratio = (lookAheadKm - accumulatedKm) / segmentKm;
+      return {
+        latitude: previous.latitude + (next.latitude - previous.latitude) * ratio,
+        longitude: previous.longitude + (next.longitude - previous.longitude) * ratio,
+      };
+    }
+
+    accumulatedKm += segmentKm;
+    previous = next;
+  }
+
+  return route[route.length - 1];
 };
 
 const getRemainingRouteCoordinates = (current: Coordinate, route: Coordinate[], isTripStarted: boolean) => {
@@ -1168,10 +1203,16 @@ export default function TripDetailsScreen() {
     // 3D is the close navigation view. In 2D keep the complete route visible,
     // including the destination marker, just like CargoLink's route preview.
     if (isTripStarted && is3DMode && currentCoordinate) {
-      const nextRoutePoint = routePath[Math.min(getNearestRouteIndex(currentCoordinate, routePath) + 1, routePath.length - 1)];
+      const nextRoutePoint = getRoutePointAhead(
+        currentCoordinate,
+        routePath,
+        NAVIGATION_LOOK_AHEAD_KM,
+      );
       mapRef.current?.animateCamera(
         {
-          center: currentCoordinate,
+          // Centrar à frente coloca o camião na zona inferior do mapa e
+          // mostra ao motorista mais estrada útil, como no Google Maps.
+          center: nextRoutePoint ?? currentCoordinate,
           pitch: is3DMode ? NAVIGATION_CAMERA_PITCH : 0,
           heading: nextRoutePoint ? getBearing(currentCoordinate, nextRoutePoint) : 0,
           zoom: NAVIGATION_CAMERA_ZOOM,
@@ -1660,10 +1701,14 @@ export default function TripDetailsScreen() {
     primaryRoute?.durationText ||
     '—';
 
+  const shouldShowTraveledRoute =
+    isTripStarted ||
+    ['aguardando_cliente', 'concluida'].includes(currentStatus);
+
   const routeProgressSegments = splitRouteAtCurrentPosition(
     currentCoordinate,
     routeCoordinates,
-    isTripStarted,
+    shouldShowTraveledRoute,
   );
   const nextStep = getNextNavigationStep(
     currentCoordinate,
@@ -1812,13 +1857,21 @@ export default function TripDetailsScreen() {
                   ? `Matrícula ${currentTrip.vehicle.plate}`
                   : 'Localização actual do motorista'
               }
-              image={require('../../assets/truck_marker_map.png')}
               anchor={{ x: 0.5, y: 0.5 }}
               flat
-              rotation={truckMarkerRotation}
+              // O camião vectorial aponta originalmente para a direita.
+              // -90º alinha a cabine ao Norte antes de aplicar o bearing.
+              rotation={(truckMarkerRotation + 270) % 360}
               zIndex={20}
-              tracksViewChanges={false}
-            />
+              tracksViewChanges>
+              <View style={styles.liveTruckMarker} collapsable={false}>
+                <MaterialCommunityIcons
+                  name="truck-cargo-container"
+                  size={27}
+                  color="#FFFFFF"
+                />
+              </View>
+            </Marker>
           ) : null}
         </MapView>
 
@@ -2578,6 +2631,21 @@ const styles = StyleSheet.create({
   navigationDistanceRecovered: { color: '#86EFAC' },
   navigationInstruction: { color: FretixColors.white, fontSize: 16, fontWeight: '800', lineHeight: 20 },
   navigationRoad: { color: '#AAB2BE', fontSize: 12, fontWeight: '700', marginTop: 3 },
+  liveTruckMarker: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#111827',
+    borderWidth: 2,
+    borderColor: FretixColors.yellow,
+    shadowColor: '#000000',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.42,
+    shadowRadius: 4,
+    elevation: 12,
+  },
   destinationPlaceLabel: {
     maxWidth: 145,
     flexDirection: 'row',
