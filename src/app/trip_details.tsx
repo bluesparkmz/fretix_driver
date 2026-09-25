@@ -87,7 +87,7 @@ const OFF_ROUTE_SAMPLES_REQUIRED = 2;
 const ROUTE_RECOVERY_SAMPLES_REQUIRED = 2;
 const ROUTE_RECOVERY_MIN_MOVEMENT_KM = 0.015;
 const OFF_ROUTE_REMINDER_INTERVAL_MS = 10_000;
-const NAVIGATION_CAMERA_ZOOM = 18.2;
+const NAVIGATION_CAMERA_ZOOM = 18.5;
 const NAVIGATION_CAMERA_PITCH = 67;
 const NAVIGATION_LOOK_AHEAD_KM = 0.12;
 const GUIDANCE_HIGHLIGHT_DISTANCE_KM = 0.3;
@@ -1680,8 +1680,9 @@ export default function TripDetailsScreen() {
     destinationCoordinate ??
     DEFAULT_MAP_CENTER;
 
-  // A imagem fornecida aponta com a cabine para o topo, por isso 0º = Norte.
-  const truckMarkerRotation = driverBearing;
+  // Compensa a orientação aplicada pelo marcador nativo para manter a
+  // cabine voltada para o sentido real do movimento.
+  const truckMarkerRotation = (driverBearing + 180) % 360;
 
   const routeDistanceKm =
     parseGoogleDistanceKm(primaryRoute?.distanceText) ??
@@ -1865,7 +1866,7 @@ export default function TripDetailsScreen() {
               }
               anchor={{ x: 0.5, y: 0.5 }}
               flat
-              // O PNG aponta com a cabine para o Norte (0 graus).
+              // A correcção de orientação já está aplicada ao bearing acima.
               rotation={truckMarkerRotation}
               zIndex={20}
               tracksViewChanges={false}
