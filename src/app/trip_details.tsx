@@ -92,7 +92,11 @@ const NAVIGATION_CAMERA_PITCH = 67;
 const NAVIGATION_LOOK_AHEAD_KM = 0.12;
 const TRUCK_HEADING_LOOK_AHEAD_KM = 0.035;
 const MIN_HEADING_MOVEMENT_KM = 0.004;
-const HEADING_SMOOTHING_FACTOR = 0.55;
+const CAMERA_HEADING_DEAD_ZONE_DEG = 5;
+const CAMERA_MAX_TURN_PER_UPDATE_DEG = 24;
+const CAMERA_MIN_FOLLOW_MOVEMENT_KM = 0.003;
+const CAMERA_MIN_UPDATE_INTERVAL_MS = 500;
+const CAMERA_ANIMATION_DURATION_MS = 900;
 const MARKER_ANIMATION_DURATION_MS = 850;
 const GUIDANCE_HIGHLIGHT_DISTANCE_KM = 0.3;
 const NEAR_DESTINATION_DISTANCE_KM = 0.5;
@@ -466,9 +470,46 @@ const getBearing = (from: Coordinate, to: Coordinate) => {
   return (((Math.atan2(y, x) * 180) / Math.PI) + 360) % 360;
 };
 
-const interpolateBearing = (current: number, target: number, factor: number) => {
-  const shortestTurn = ((target - current + 540) % 360) - 180;
-  return (current + shortestTurn * factor + 360) % 360;
+const getShortestBearingDelta = (current: number, target: number) =>
+  ((target - current + 540) % 360) - 180;
+
+const stabilizeCameraBearing = (current: number, target: number) => {
+  const delta = getShortestBearingDelta(current, target);
+  if (Math.abs(delta) < CAMERA_HEADING_DEAD_ZONE_DEG) return current;
+
+  const limitedTurn = Math.max(
+    -CAMERA_MAX_TURN_PER_UPDATE_DEG,
+    Math.min(CAMERA_MAX_TURN_PER_UPDATE_DEG, delta),
+  );
+  return (current + limitedTurn + 360) % 360;
+};
+
+const getCoordinateAhead = (
+  coordinate: Coordinate,
+  bearing: number,
+  distanceKm: number,
+): Coordinate => {
+  const radiusKm = 6371;
+  const angularDistance = distanceKm / radiusKm;
+  const bearingRad = (bearing * Math.PI) / 180;
+  const latitudeRad = (coordinate.latitude * Math.PI) / 180;
+  const longitudeRad = (coordinate.longitude * Math.PI) / 180;
+
+  const nextLatitude = Math.asin(
+    Math.sin(latitudeRad) * Math.cos(angularDistance) +
+      Math.cos(latitudeRad) * Math.sin(angularDistance) * Math.cos(bearingRad),
+  );
+  const nextLongitude =
+    longitudeRad +
+    Math.atan2(
+      Math.sin(bearingRad) * Math.sin(angularDistance) * Math.cos(latitudeRad),
+      Math.cos(angularDistance) - Math.sin(latitudeRad) * Math.sin(nextLatitude),
+    );
+
+  return {
+    latitude: (nextLatitude * 180) / Math.PI,
+    longitude: (nextLongitude * 180) / Math.PI,
+  };
 };
 
 const getNearestRouteIndex = (coordinate: Coordinate, route: Coordinate[]) => {
@@ -860,14 +901,19 @@ export default function TripDetailsScreen() {
   const truckMarkerRef = useRef<MapMarker | null>(null);
 
   const previousDriverCoordinateRef = useRef<Coordinate | null>(null);
-  const hasDriverBearingRef = useRef(false);
+  const hasCameraBearingRef = useRef(false);
+  const lastCameraFollowRef = useRef<{
+    coordinate: Coordinate;
+    bearing: number;
+    timestamp: number;
+  } | null>(null);
   const matchedRouteSegmentRef = useRef<{
     route: Coordinate[];
     segmentIndex: number;
   } | null>(null);
   const markerAnimationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const arrivalPromptShownRef = useRef(false);
-  const [driverBearing, setDriverBearing] = useState(0);
+  const [cameraBearing, setCameraBearing] = useState(0);
   const [animatedTruckCoordinate, setAnimatedTruckCoordinate] = useState<Coordinate | null>(null);
   const [isRecoveringRoute, setIsRecoveringRoute] = useState(false);
   const [routeRecoveredVisible, setRouteRecoveredVisible] = useState(false);
@@ -1054,16 +1100,12 @@ export default function TripDetailsScreen() {
     }
 
     if (targetBearing != null) {
-      setDriverBearing((currentBearing) => {
-        if (!hasDriverBearingRef.current) {
-          hasDriverBearingRef.current = true;
+      setCameraBearing((currentBearing) => {
+        if (!hasCameraBearingRef.current) {
+          hasCameraBearingRef.current = true;
           return targetBearing!;
         }
-        return interpolateBearing(
-          currentBearing,
-          targetBearing!,
-          HEADING_SMOOTHING_FACTOR,
-        );
+        return stabilizeCameraBearing(currentBearing, targetBearing!);
       });
     }
 
@@ -1113,7 +1155,8 @@ export default function TripDetailsScreen() {
   useEffect(() => {
     matchedRouteSegmentRef.current = null;
     previousDriverCoordinateRef.current = null;
-    hasDriverBearingRef.current = false;
+    hasCameraBearingRef.current = false;
+    lastCameraFollowRef.current = null;
     setAnimatedTruckCoordinate(null);
   }, [currentTrip?.id]);
 
@@ -1346,7 +1389,7 @@ export default function TripDetailsScreen() {
     // 3D is the close navigation view. In 2D keep the complete route visible,
     // including the destination marker, just like CargoLink's route preview.
     if (isTripStarted && is3DMode && currentCoordinate) {
-      const nextRoutePoint =
+      const routeLookAheadPoint =
         isSnappedToRoute && routeProjection
           ? getRoutePointAheadFromProjection(
               routeProjection,
@@ -1354,17 +1397,54 @@ export default function TripDetailsScreen() {
               NAVIGATION_LOOK_AHEAD_KM,
             )
           : null;
+
+      const cameraCenter =
+        routeLookAheadPoint ??
+        getCoordinateAhead(
+          currentCoordinate,
+          cameraBearing,
+          NAVIGATION_LOOK_AHEAD_KM * 0.65,
+        );
+      const now = Date.now();
+      const previousCamera = lastCameraFollowRef.current;
+      const movedKm = previousCamera
+        ? getDistanceKm(previousCamera.coordinate, currentCoordinate)
+        : Number.POSITIVE_INFINITY;
+      const bearingChange = previousCamera
+        ? Math.abs(getShortestBearingDelta(previousCamera.bearing, cameraBearing))
+        : Number.POSITIVE_INFINITY;
+
+      if (
+        previousCamera &&
+        now - previousCamera.timestamp < CAMERA_MIN_UPDATE_INTERVAL_MS
+      ) {
+        return;
+      }
+
+      if (
+        previousCamera &&
+        movedKm < CAMERA_MIN_FOLLOW_MOVEMENT_KM &&
+        bearingChange < CAMERA_HEADING_DEAD_ZONE_DEG
+      ) {
+        return;
+      }
+
+      lastCameraFollowRef.current = {
+        coordinate: currentCoordinate,
+        bearing: cameraBearing,
+        timestamp: now,
+      };
       mapRef.current?.animateCamera(
         {
           // Centrar à frente coloca o camião na zona inferior do mapa e
           // mostra ao motorista mais estrada útil, como no Google Maps.
-          center: nextRoutePoint ?? currentCoordinate,
+          center: cameraCenter,
           pitch: is3DMode ? NAVIGATION_CAMERA_PITCH : 0,
-          // Câmara e camião usam o mesmo bearing suavizado.
-          heading: driverBearing,
+          // Apenas o mapa gira; o camião permanece fixo e voltado para cima.
+          heading: cameraBearing,
           zoom: NAVIGATION_CAMERA_ZOOM,
         },
-        { duration: 850 },
+        { duration: CAMERA_ANIMATION_DURATION_MS },
       );
       return;
     }
@@ -1386,7 +1466,7 @@ export default function TripDetailsScreen() {
     isTripStarted,
     displayNavigationLocation?.latitude,
     displayNavigationLocation?.longitude,
-    driverBearing,
+    cameraBearing,
     isSnappedToRoute,
     routeProjection?.segmentIndex,
     locationHistory,
@@ -1832,10 +1912,6 @@ export default function TripDetailsScreen() {
     destinationCoordinate ??
     DEFAULT_MAP_CENTER;
 
-  // Compensa a orientação aplicada pelo marcador nativo para manter a
-  // cabine voltada para o sentido real do movimento.
-  const truckMarkerRotation = (driverBearing + 180) % 360;
-
   const routeDistanceKm =
     parseGoogleDistanceKm(primaryRoute?.distanceText) ??
     (routeCoordinates.length > 1 ? getPolylineDistanceKm(routeCoordinates) : null);
@@ -1962,7 +2038,7 @@ export default function TripDetailsScreen() {
           provider={PROVIDER_GOOGLE}
           mapType="standard"
           pitchEnabled
-          rotateEnabled
+          rotateEnabled={!isTripStarted}
           showsBuildings
           showsCompass={false}
           showsUserLocation={false}
@@ -2019,9 +2095,10 @@ export default function TripDetailsScreen() {
                   : 'Localização actual do motorista'
               }
               anchor={{ x: 0.5, y: 0.5 }}
-              flat
-              // A correcção de orientação já está aplicada ao bearing acima.
-              rotation={truckMarkerRotation}
+              // Billboard: o camião fica fixo e voltado para cima no ecrã.
+              // A estrada gira por baixo dele através do heading da câmara.
+              flat={false}
+              rotation={0}
               zIndex={20}
               tracksViewChanges={false}
             />
