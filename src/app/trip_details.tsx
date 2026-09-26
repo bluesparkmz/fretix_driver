@@ -16,7 +16,7 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import MapView, { Marker, Polyline, PROVIDER_GOOGLE, type MapMarker } from 'react-native-maps';
+import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
 
 import { CustomDialog } from '@/components/custom-dialog';
 import { LoadTypeImage } from '@/components/load-type-image';
@@ -39,7 +39,7 @@ import { getApiErrorMessage } from '@/utils/api-error';
 import { resolveMediaUrl } from '@/utils/media-url';
 import { buildReturnTo, goBackSmart, pushWithReturnTo, useSmartBackHandler } from '@/utils/navigation';
 
-const { height: SCREEN_HEIGHT } = Dimensions.get('window');
+const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 const COLLAPSED_HEIGHT = 178;
 const EXPANDED_HEIGHT = SCREEN_HEIGHT * 0.72;
 const DRAG_THRESHOLD = 60;
@@ -89,7 +89,6 @@ const ROUTE_RECOVERY_MIN_MOVEMENT_KM = 0.015;
 const OFF_ROUTE_REMINDER_INTERVAL_MS = 10_000;
 const NAVIGATION_CAMERA_ZOOM = 18.5;
 const NAVIGATION_CAMERA_PITCH = 67;
-const NAVIGATION_LOOK_AHEAD_KM = 0.12;
 const TRUCK_HEADING_LOOK_AHEAD_KM = 0.035;
 const MIN_HEADING_MOVEMENT_KM = 0.004;
 const CAMERA_HEADING_DEAD_ZONE_DEG = 5;
@@ -97,7 +96,14 @@ const CAMERA_MAX_TURN_PER_UPDATE_DEG = 24;
 const CAMERA_MIN_FOLLOW_MOVEMENT_KM = 0.003;
 const CAMERA_MIN_UPDATE_INTERVAL_MS = 500;
 const CAMERA_ANIMATION_DURATION_MS = 900;
-const MARKER_ANIMATION_DURATION_MS = 850;
+const NAVIGATION_MAP_PADDING = {
+  top: 230,
+  right: 76,
+  bottom: COLLAPSED_HEIGHT + 24,
+  left: 24,
+};
+const TRUCK_OVERLAY_WIDTH = 32;
+const TRUCK_OVERLAY_HEIGHT = 97;
 const GUIDANCE_HIGHLIGHT_DISTANCE_KM = 0.3;
 const NEAR_DESTINATION_DISTANCE_KM = 0.5;
 const ARRIVAL_MODAL_DISTANCE_KM = 0.05;
@@ -482,34 +488,6 @@ const stabilizeCameraBearing = (current: number, target: number) => {
     Math.min(CAMERA_MAX_TURN_PER_UPDATE_DEG, delta),
   );
   return (current + limitedTurn + 360) % 360;
-};
-
-const getCoordinateAhead = (
-  coordinate: Coordinate,
-  bearing: number,
-  distanceKm: number,
-): Coordinate => {
-  const radiusKm = 6371;
-  const angularDistance = distanceKm / radiusKm;
-  const bearingRad = (bearing * Math.PI) / 180;
-  const latitudeRad = (coordinate.latitude * Math.PI) / 180;
-  const longitudeRad = (coordinate.longitude * Math.PI) / 180;
-
-  const nextLatitude = Math.asin(
-    Math.sin(latitudeRad) * Math.cos(angularDistance) +
-      Math.cos(latitudeRad) * Math.sin(angularDistance) * Math.cos(bearingRad),
-  );
-  const nextLongitude =
-    longitudeRad +
-    Math.atan2(
-      Math.sin(bearingRad) * Math.sin(angularDistance) * Math.cos(latitudeRad),
-      Math.cos(angularDistance) - Math.sin(latitudeRad) * Math.sin(nextLatitude),
-    );
-
-  return {
-    latitude: (nextLatitude * 180) / Math.PI,
-    longitude: (nextLongitude * 180) / Math.PI,
-  };
 };
 
 const getNearestRouteIndex = (coordinate: Coordinate, route: Coordinate[]) => {
@@ -898,8 +876,6 @@ export default function TripDetailsScreen() {
   const sheetHeight = useRef(new Animated.Value(COLLAPSED_HEIGHT)).current;
   const lastHeight = useRef(COLLAPSED_HEIGHT);
   const mapRef = useRef<MapView | null>(null);
-  const truckMarkerRef = useRef<MapMarker | null>(null);
-
   const previousDriverCoordinateRef = useRef<Coordinate | null>(null);
   const hasCameraBearingRef = useRef(false);
   const lastCameraFollowRef = useRef<{
@@ -911,10 +887,9 @@ export default function TripDetailsScreen() {
     route: Coordinate[];
     segmentIndex: number;
   } | null>(null);
-  const markerAnimationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const arrivalPromptShownRef = useRef(false);
   const [cameraBearing, setCameraBearing] = useState(0);
-  const [animatedTruckCoordinate, setAnimatedTruckCoordinate] = useState<Coordinate | null>(null);
+  const [mapLayout, setMapLayout] = useState({ width: SCREEN_WIDTH, height: SCREEN_HEIGHT });
   const [isRecoveringRoute, setIsRecoveringRoute] = useState(false);
   const [routeRecoveredVisible, setRouteRecoveredVisible] = useState(false);
   const [offRouteReminderTick, setOffRouteReminderTick] = useState(0);
@@ -1123,48 +1098,11 @@ export default function TripDetailsScreen() {
   ]);
 
   useEffect(() => {
-    if (!displayNavigationLocation) {
-      setAnimatedTruckCoordinate(null);
-      return;
-    }
-
-    if (!animatedTruckCoordinate) {
-      setAnimatedTruckCoordinate(displayNavigationLocation);
-      return;
-    }
-
-    if (coordinatesMatch(animatedTruckCoordinate, displayNavigationLocation)) return;
-
-    truckMarkerRef.current?.animateMarkerToCoordinate(
-      displayNavigationLocation,
-      MARKER_ANIMATION_DURATION_MS,
-    );
-
-    if (markerAnimationTimeoutRef.current) {
-      clearTimeout(markerAnimationTimeoutRef.current);
-    }
-    markerAnimationTimeoutRef.current = setTimeout(() => {
-      setAnimatedTruckCoordinate(displayNavigationLocation);
-      markerAnimationTimeoutRef.current = null;
-    }, MARKER_ANIMATION_DURATION_MS);
-  }, [
-    displayNavigationLocation?.latitude,
-    displayNavigationLocation?.longitude,
-  ]);
-
-  useEffect(() => {
     matchedRouteSegmentRef.current = null;
     previousDriverCoordinateRef.current = null;
     hasCameraBearingRef.current = false;
     lastCameraFollowRef.current = null;
-    setAnimatedTruckCoordinate(null);
   }, [currentTrip?.id]);
-
-  useEffect(() => () => {
-    if (markerAnimationTimeoutRef.current) {
-      clearTimeout(markerAnimationTimeoutRef.current);
-    }
-  }, []);
 
   const showDialog = useCallback((title: string, message: string, type: 'success' | 'error' | 'info' = 'info') => {
     setDialogProps({ title, message, type });
@@ -1389,22 +1327,6 @@ export default function TripDetailsScreen() {
     // 3D is the close navigation view. In 2D keep the complete route visible,
     // including the destination marker, just like CargoLink's route preview.
     if (isTripStarted && is3DMode && currentCoordinate) {
-      const routeLookAheadPoint =
-        isSnappedToRoute && routeProjection
-          ? getRoutePointAheadFromProjection(
-              routeProjection,
-              effectiveRouteForSnap,
-              NAVIGATION_LOOK_AHEAD_KM,
-            )
-          : null;
-
-      const cameraCenter =
-        routeLookAheadPoint ??
-        getCoordinateAhead(
-          currentCoordinate,
-          cameraBearing,
-          NAVIGATION_LOOK_AHEAD_KM * 0.65,
-        );
       const now = Date.now();
       const previousCamera = lastCameraFollowRef.current;
       const movedKm = previousCamera
@@ -1436,9 +1358,9 @@ export default function TripDetailsScreen() {
       };
       mapRef.current?.animateCamera(
         {
-          // Centrar à frente coloca o camião na zona inferior do mapa e
-          // mostra ao motorista mais estrada útil, como no Google Maps.
-          center: cameraCenter,
+          // O alvo da câmara é exactamente a posição do motorista. O padding
+          // desloca esse alvo para a área útil sem adulterar a coordenada.
+          center: currentCoordinate,
           pitch: is3DMode ? NAVIGATION_CAMERA_PITCH : 0,
           // Apenas o mapa gira; o camião permanece fixo e voltado para cima.
           heading: cameraBearing,
@@ -1903,7 +1825,11 @@ export default function TripDetailsScreen() {
   const hasDrivingRoute = routeCoordinates.length > 1;
   const historyCoordinates = normalizeTripLocations(locationHistory);
   const liveMarker = isTripStarted ? displayNavigationLocation : null;
-  const truckMapCoordinate = animatedTruckCoordinate ?? liveMarker;
+  const mapTruckCoordinate = !isTripStarted
+    ? navigationLocation
+    : !is3DMode
+      ? displayNavigationLocation
+      : null;
   const traveledRouteCoordinates = buildTraveledRouteCoordinates(historyCoordinates, liveMarker);
   const currentCoordinate =
     displayNavigationLocation ??
@@ -2031,7 +1957,9 @@ export default function TripDetailsScreen() {
         </View>
       </SafeAreaView>
 
-      <View style={styles.mapWrap}>
+      <View
+        style={styles.mapWrap}
+        onLayout={({ nativeEvent }) => setMapLayout(nativeEvent.layout)}>
         <MapView
           ref={mapRef}
           style={StyleSheet.absoluteFill}
@@ -2039,6 +1967,7 @@ export default function TripDetailsScreen() {
           mapType="standard"
           pitchEnabled
           rotateEnabled={!isTripStarted}
+          mapPadding={isTripStarted && is3DMode ? NAVIGATION_MAP_PADDING : undefined}
           showsBuildings
           showsCompass={false}
           showsUserLocation={false}
@@ -2079,10 +2008,9 @@ export default function TripDetailsScreen() {
           ) : null}
           {originCoordinate ? <Marker coordinate={originCoordinate} title="Origem" description={origin} pinColor="#3B82F6" zIndex={5} /> : null}
           {destinationCoordinate ? <Marker coordinate={destinationCoordinate} title="Destino" description={destination} pinColor={FretixColors.yellow} zIndex={6} /> : null}
-          {truckMapCoordinate ? (
+          {mapTruckCoordinate ? (
             <Marker
-              ref={truckMarkerRef}
-              coordinate={truckMapCoordinate}
+              coordinate={mapTruckCoordinate}
               image={
                 Platform.OS === 'android'
                   ? { uri: 'truck_marker_map' }
@@ -2104,6 +2032,34 @@ export default function TripDetailsScreen() {
             />
           ) : null}
         </MapView>
+
+        {isTripStarted && is3DMode && displayNavigationLocation ? (
+          <View
+            pointerEvents="none"
+            style={[
+              styles.navigationTruckOverlay,
+              {
+                left:
+                  (NAVIGATION_MAP_PADDING.left +
+                    mapLayout.width -
+                    NAVIGATION_MAP_PADDING.right) /
+                    2 -
+                  TRUCK_OVERLAY_WIDTH / 2,
+                top:
+                  (NAVIGATION_MAP_PADDING.top +
+                    mapLayout.height -
+                    NAVIGATION_MAP_PADDING.bottom) /
+                    2 -
+                  TRUCK_OVERLAY_HEIGHT / 2,
+              },
+            ]}>
+            <Image
+              source={require('../../assets/truck_marker_map.png')}
+              style={styles.navigationTruckImage}
+              resizeMode="contain"
+            />
+          </View>
+        ) : null}
 
         {isTripStarted && !hasDrivingRoute && routeLoading ? (
           <View style={styles.routeRecalculatingBadge} pointerEvents="none">
@@ -2796,6 +2752,19 @@ const styles = StyleSheet.create({
   headerTitle: { color: FretixColors.white, fontSize: 15, fontWeight: '700' },
   headerSub: { color: '#8D949E', fontSize: 12, marginTop: 1 },
   mapWrap: { flex: 1, position: 'relative' },
+  navigationTruckOverlay: {
+    position: 'absolute',
+    width: TRUCK_OVERLAY_WIDTH,
+    height: TRUCK_OVERLAY_HEIGHT,
+    zIndex: 8,
+    elevation: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  navigationTruckImage: {
+    width: TRUCK_OVERLAY_WIDTH,
+    height: TRUCK_OVERLAY_HEIGHT,
+  },
   routeRecalculatingBadge: {
     position: 'absolute',
     top: 16,
