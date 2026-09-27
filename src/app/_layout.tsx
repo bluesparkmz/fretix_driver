@@ -15,6 +15,7 @@ import { WebSocketProvider } from '@/context/WebSocketContext';
 import { WebSocketDataBridge } from '@/components/websocket-data-bridge';
 import LoginScreen from './login';
 import { PasswordChangeModal } from '@/components/password-change-modal';
+import { PushNotificationBridge } from '@/components/push-notification-bridge';
 
 SplashScreen.preventAutoHideAsync();
 
@@ -72,6 +73,7 @@ export default function RootLayout() {
         <AppDataProvider>
           <WebSocketProvider>
             <WebSocketDataBridge />
+            <PushNotificationBridge />
             <RootLayoutNav />
           </WebSocketProvider>
         </AppDataProvider>

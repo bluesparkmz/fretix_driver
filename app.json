@@ -2,7 +2,7 @@
   "expo": {
     "name": "Fretix Driver",
     "slug": "fretix-driver",
-    "version": "1.0.3",
+    "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "fretix",
@@ -24,6 +24,7 @@
     "android": {
       "predictiveBackGestureEnabled": false,
       "package": "com.fretix.driver",
+      "googleServicesFile": "./google-services-driver.json",
       "permissions": [
         "android.permission.READ_MEDIA_IMAGES",
         "android.permission.READ_EXTERNAL_STORAGE",
@@ -70,7 +71,7 @@
         }
       ],
       "expo-web-browser",
-      "expo-font"
+      "expo-notifications"
     ],
     "experiments": {
       "typedRoutes": true
@@ -82,7 +83,6 @@
       "eas": {
         "projectId": "16809afb-6d6f-4933-aea5-279f55fcea6b"
       }
-    },
-    "owner": "diquijoaquim"
+    }
   }
 }

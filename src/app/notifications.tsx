@@ -64,14 +64,15 @@ export default function NotificationsScreen() {
       }
     }
 
-    // Optional: Navigate based on payload/type
-    if (item.payload) {
-      if (item.payload.trip_id) {
-        router.push('/trips');
-      } else {
-        router.push('/trips');
-      }
+    const tripId = Number(item.payload?.trip_id);
+    if (Number.isFinite(tripId) && tripId > 0) {
+      router.push({
+        pathname: '/trip_details',
+        params: { id: String(tripId), from: 'notifications' },
+      });
+      return;
     }
+    router.push('/trips');
   };
 
   const getIconConfig = (type: string | null) => {
