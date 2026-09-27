@@ -1,5 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
-import type { ComponentProps } from 'react';
+import { useState, type ComponentProps } from 'react';
 import { Image, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
@@ -9,6 +9,7 @@ import { FretixColors } from '@/constants/theme';
 import { useAuth } from '@/context/AuthContext';
 import { UserAvatar } from '@/components/user-avatar';
 import { getUserRoleLabel } from '@/utils/user-role';
+import { PasswordChangeModal } from '@/components/password-change-modal';
 
 type InfoRowData = {
   label: string;
@@ -67,25 +68,46 @@ const preferencesSection: InfoSectionData = {
   rows: [{ label: 'Notificacoes', icon: 'notifications-outline' }],
 };
 
-function InfoSection({ section }: { section: InfoSectionData }) {
+function InfoSection({
+  section,
+  onRowPress,
+}: {
+  section: InfoSectionData;
+  onRowPress?: (row: InfoRowData) => void;
+}) {
   return (
     <View style={styles.section}>
       <Text style={styles.sectionTitle}>{section.title}</Text>
       <View style={styles.sectionCard}>
         {section.rows.map((row, index) => (
-          <InfoRow key={row.label} row={row} isLast={index === section.rows.length - 1} />
+          <InfoRow
+            key={row.label}
+            row={row}
+            isLast={index === section.rows.length - 1}
+            onPress={onRowPress && row.label === 'Senha' ? () => onRowPress(row) : undefined}
+          />
         ))}
       </View>
     </View>
   );
 }
 
-function InfoRow({ row, isLast }: { row: InfoRowData; isLast: boolean }) {
+function InfoRow({
+  row,
+  isLast,
+  onPress,
+}: {
+  row: InfoRowData;
+  isLast: boolean;
+  onPress?: () => void;
+}) {
   const iconColor = row.iconColor ?? FretixColors.yellow;
 
   return (
     <Pressable
       style={[styles.infoRow, !isLast && styles.infoRowBorder]}
+      onPress={onPress}
+      disabled={!onPress}
       accessibilityRole="button"
       accessibilityLabel={row.label}>
       <View style={[styles.infoIconWrap, { backgroundColor: withAlpha(iconColor, 0.14) }]}>
@@ -107,6 +129,7 @@ function InfoRow({ row, isLast }: { row: InfoRowData; isLast: boolean }) {
 /** Personal information — profile details and account settings (Figma). */
 export function PersonalInformationScreen() {
   const { user } = useAuth();
+  const [passwordModalVisible, setPasswordModalVisible] = useState(false);
 
   // Create dynamic sections based on real user data
   const personalDataSection: InfoSectionData = {
@@ -186,7 +209,12 @@ export function PersonalInformationScreen() {
 
           <InfoSection section={personalDataSection} />
           <InfoSection section={contactSection} />
-          <InfoSection section={securitySection} />
+          <InfoSection
+            section={securitySection}
+            onRowPress={(row) => {
+              if (row.label === 'Senha') setPasswordModalVisible(true);
+            }}
+          />
           <InfoSection section={preferencesSection} />
 
           <Pressable style={styles.deleteButton} accessibilityRole="button">
@@ -195,6 +223,10 @@ export function PersonalInformationScreen() {
           </Pressable>
           <Text style={styles.deleteWarning}>Atencao: esta acao nao pode ser desfeita.</Text>
         </ScrollView>
+        <PasswordChangeModal
+          visible={passwordModalVisible}
+          onClose={() => setPasswordModalVisible(false)}
+        />
       </SafeAreaView>
     </View>
   );

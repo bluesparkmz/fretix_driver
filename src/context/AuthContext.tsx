@@ -20,6 +20,8 @@ interface AuthContextType {
   logout: () => Promise<void>;
   getWallet: () => Promise<void>;
   updateUser: (data: Partial<Pick<User, 'name' | 'email' | 'profile_photo'>>) => Promise<void>;
+  changeInitialPassword: (newPassword: string) => Promise<void>;
+  changePassword: (currentPassword: string, newPassword: string) => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -154,6 +156,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(updatedUser);
   }
 
+  async function changeInitialPassword(newPassword: string) {
+    const updatedUser = await authService.changeInitialPassword(newPassword);
+    setUser(updatedUser);
+  }
+
+  async function changePassword(currentPassword: string, newPassword: string) {
+    const updatedUser = await authService.changePassword(currentPassword, newPassword);
+    setUser(updatedUser);
+  }
+
   return (
     <AuthContext.Provider
       value={{
@@ -172,6 +184,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         logout,
         getWallet,
         updateUser,
+        changeInitialPassword,
+        changePassword,
       }}
     >
       {children}

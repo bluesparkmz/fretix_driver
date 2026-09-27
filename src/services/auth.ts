@@ -11,6 +11,7 @@ export interface User {
   verified: boolean;
   profile_photo: string | null;
   needs_onboarding?: boolean;
+  must_change_password?: boolean;
 }
 
 export function userNeedsOnboarding(user: User | null | undefined): boolean {
@@ -119,6 +120,25 @@ export const authService = {
   async updateUser(data: Partial<Pick<User, 'name' | 'email' | 'profile_photo'>>): Promise<User> {
     const response = await api.patch('/users/me', data);
     const user = response.data;
+    await SecureStore.setItemAsync('user', JSON.stringify(user));
+    return user;
+  },
+
+  async changeInitialPassword(newPassword: string): Promise<User> {
+    const response = await api.patch('/auth/password/initial', {
+      new_password: newPassword,
+    });
+    const user = response.data;
+    await SecureStore.setItemAsync('user', JSON.stringify(user));
+    return user;
+  },
+
+  async changePassword(currentPassword: string, newPassword: string): Promise<User> {
+    await api.patch('/auth/password', {
+      current_password: currentPassword,
+      new_password: newPassword,
+    });
+    const user = await authService.getMe();
     await SecureStore.setItemAsync('user', JSON.stringify(user));
     return user;
   },

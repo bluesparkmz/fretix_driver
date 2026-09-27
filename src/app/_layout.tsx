@@ -14,6 +14,7 @@ import { AuthProvider } from '@/context/AuthContext';
 import { WebSocketProvider } from '@/context/WebSocketContext';
 import { WebSocketDataBridge } from '@/components/websocket-data-bridge';
 import LoginScreen from './login';
+import { PasswordChangeModal } from '@/components/password-change-modal';
 
 SplashScreen.preventAutoHideAsync();
 
@@ -47,6 +48,10 @@ function RootLayoutNav() {
       <AppDrawer>
         <AppTabs />
       </AppDrawer>
+      <PasswordChangeModal
+        visible={user.user_type === 'motorista' && user.must_change_password === true}
+        mandatory
+      />
     </ThemeProvider>
   );
 }
